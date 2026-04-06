@@ -1,57 +1,20 @@
-# PassCard KE - Access the Xtraordinary
+<div align="center">
+<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+</div>
 
-The ultimate ticketing platform for seamless event experiences.
+# Run and deploy your AI Studio app
 
-## Features
-- ✨ Modern, responsive UI with Tailwind CSS
-- 🎫 Seamless event ticket purchasing
-- 🔒 Secure Admin Dashboard with Firebase Authentication
-- 📱 Mobile-optimized QR code scanner for ticket verification
-- 💳 M-Pesa Daraja API integration
-- 📧 Automated ticket and report emails with PDF attachments
+This contains everything you need to run your app locally.
 
-## Tech Stack
-- **Frontend**: React 19, Vite, Tailwind CSS, Motion
-- **Backend**: Node.js, Express
-- **Database**: SQLite (Local), Firestore (Cloud)
-- **Authentication**: Firebase Authentication (Google Sign-In)
-- **Email**: Nodemailer
-- **PDF Generation**: PDFKit
+View your app in AI Studio: https://ai.studio/apps/2a3517da-4ee5-4f30-bd42-408a9f34f969
 
-## Getting Started
+## Run Locally
 
-### Prerequisites
-- Node.js 20+
-- Firebase Project
+**Prerequisites:**  Node.js
 
-### Installation
-1. Clone the repository
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-3. Set up environment variables in `.env` (see `.env.example`)
-4. Start the development server:
-   ```bash
-   npm run dev
-   ```
 
-## Deployment
-
-### Environment Variables
-Ensure the following environment variables are set in your deployment environment:
-- `GEMINI_API_KEY`
-- `APP_URL`
-- `MPESA_CONSUMER_KEY`, `MPESA_CONSUMER_SECRET`, `MPESA_PASSKEY`, `MPESA_SHORTCODE`, `MPESA_CALLBACK_URL`
-- `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_USER`, `EMAIL_PASS`, `EMAIL_FROM`
-- `ADMIN_EMAILS` (comma-separated list of authorized admin emails)
-- `JWT_SECRET`
-
-### Build and Start
-```bash
-npm run build
-npm start
-```
-
-## License
-MIT
+1. Install dependencies:
+   `npm install`
+2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+3. Run the app:
+   `npm run dev`
