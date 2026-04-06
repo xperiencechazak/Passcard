@@ -23,7 +23,6 @@
     "@types/uuid": "^10.0.0",
     "@vitejs/plugin-react": "^5.0.4",
     "axios": "^1.13.6",
-    "better-sqlite3": "^12.4.1",
     "clsx": "^2.1.1",
     "cors": "^2.8.6",
     "date-fns": "^4.1.0",

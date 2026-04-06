@@ -5,7 +5,22 @@ import axios from 'axios';
 import * as ics from 'ics';
 import db from './db';
 
-import { convertGoogleDriveUrl } from '../lib/utils';
+function convertGoogleDriveUrl(url: string): string {
+  if (!url) return url;
+  if (url.includes('drive.google.com')) {
+    let fileId = '';
+    const matchId = url.match(/\/d\/([a-zA-Z0-9_-]+)/);
+    const matchQuery = url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+    
+    if (matchId) fileId = matchId[1];
+    else if (matchQuery) fileId = matchQuery[1];
+    
+    if (fileId) {
+      return `https://drive.google.com/uc?export=view&id=${fileId}`;
+    }
+  }
+  return url;
+}
 
 const transporter = nodemailer.createTransport({
   host: process.env.EMAIL_HOST,
@@ -20,22 +35,23 @@ const transporter = nodemailer.createTransport({
 export async function generateEventReportPDF(eventId: string): Promise<Buffer> {
   return new Promise(async (resolve, reject) => {
     try {
-      const event = db.prepare('SELECT * FROM events WHERE id = ?').get(eventId) as any;
-      if (!event) throw new Error('Event not found');
+      const { data: event, error: eventError } = await db.from('events').select('*').eq('id', eventId).single();
+      if (eventError || !event) throw new Error('Event not found');
 
-      const ticketTypes = db.prepare('SELECT * FROM ticket_types WHERE event_id = ?').all() as any[];
-      const tickets = db.prepare(`
-        SELECT t.*, p.amount, p.quantity as payment_quantity
-        FROM tickets t 
-        LEFT JOIN payments p ON t.payment_id = p.id
-        WHERE t.event_id = ? AND t.deleted_at IS NULL
-      `).all(eventId) as any[];
-      const scanLogs = db.prepare(`
-        SELECT sl.*, t.attendee_name, t.ticket_type_id 
-        FROM scan_logs sl 
-        JOIN tickets t ON sl.ticket_id = t.id 
-        WHERE t.event_id = ? AND sl.status = 'SUCCESS'
-      `).all(eventId) as any[];
+      const { data: ticketTypes } = await db.from('ticket_types').select('*').eq('event_id', eventId);
+      const { data: tickets } = await db
+        .from('tickets')
+        .select('*, payments(amount, quantity)')
+        .eq('event_id', eventId)
+        .is('deleted_at', null);
+      
+      const { data: scanLogs } = await db
+        .from('scan_logs')
+        .select('*, tickets(attendee_name, ticket_type_id)')
+        .eq('status', 'SUCCESS');
+      
+      // Filter scan logs manually since Supabase join filtering is tricky for deep relations
+      const filteredScanLogs = (scanLogs || []).filter((sl: any) => sl.tickets?.event_id === eventId);
 
       const doc = new PDFDocument({ size: 'A4', margin: 50 });
       const chunks: any[] = [];
@@ -62,17 +78,17 @@ export async function generateEventReportPDF(eventId: string): Promise<Buffer> {
       doc.moveDown(2);
 
       // Summary Section
-      const totalSold = tickets.length;
-      const totalScanned = tickets.filter(t => t.status === 'USED').length;
+      const totalSold = (tickets || []).length;
+      const totalScanned = (tickets || []).filter((t: any) => t.status === 'USED').length;
       const totalUnused = totalSold - totalScanned;
       
       let totalRevenue = 0;
-      const typeStats = ticketTypes.map(type => {
-        const ticketsForType = tickets.filter(t => t.ticket_type_id === type.id);
+      const typeStats = (ticketTypes || []).map(type => {
+        const ticketsForType = (tickets || []).filter((t: any) => t.ticket_type_id === type.id);
         const soldForType = ticketsForType.length;
         // Calculate revenue based on actual amount paid per ticket
-        const revenueForType = ticketsForType.reduce((sum, t) => {
-          const pricePaid = (t.amount && t.payment_quantity) ? (t.amount / t.payment_quantity) : 0;
+        const revenueForType = ticketsForType.reduce((sum, t: any) => {
+          const pricePaid = (t.payments?.amount && t.payments?.quantity) ? (t.payments.amount / t.payments.quantity) : 0;
           return sum + pricePaid;
         }, 0);
         totalRevenue += revenueForType;
@@ -84,7 +100,7 @@ export async function generateEventReportPDF(eventId: string): Promise<Buffer> {
       });
 
       // Handle RSVPs if it's a free event or has RSVPs
-      const rsvpTickets = tickets.filter(t => t.ticket_type_id.startsWith('RSVP-'));
+      const rsvpTickets = (tickets || []).filter((t: any) => t.ticket_type_id && t.ticket_type_id.startsWith('RSVP-'));
       if (rsvpTickets.length > 0) {
         const rsvpSold = rsvpTickets.length;
         typeStats.push({
@@ -130,8 +146,8 @@ export async function generateEventReportPDF(eventId: string): Promise<Buffer> {
       
       const purchaseTable = {
         headers: ['Ticket ID', 'Buyer Name', 'Type', 'Date'],
-        rows: tickets.map(t => {
-          const type = ticketTypes.find(tt => tt.id === t.ticket_type_id);
+        rows: (tickets || []).map((t: any) => {
+          const type = (ticketTypes || []).find(tt => tt.id === t.ticket_type_id);
           return [t.id, t.attendee_name, type?.name || 'Unknown', new Date(t.created_at).toLocaleDateString()];
         })
       };
@@ -146,9 +162,9 @@ export async function generateEventReportPDF(eventId: string): Promise<Buffer> {
       
       const attendanceTable = {
         headers: ['Ticket ID', 'Name', 'Type', 'Scan Time'],
-        rows: scanLogs.map(l => {
-          const type = ticketTypes.find(tt => tt.id === l.ticket_type_id);
-          return [l.ticket_id, l.attendee_name, type?.name || 'Unknown', new Date(l.scanned_at).toLocaleTimeString()];
+        rows: filteredScanLogs.map((l: any) => {
+          const type = (ticketTypes || []).find(tt => tt.id === l.tickets?.ticket_type_id);
+          return [l.ticket_id, l.tickets?.attendee_name, type?.name || 'Unknown', new Date(l.scanned_at).toLocaleTimeString()];
         })
       };
       await doc.table(attendanceTable);
@@ -167,7 +183,8 @@ export async function sendEventReportEmail(eventId: string, adminEmail: string) 
   }
 
   try {
-    const event = db.prepare('SELECT name FROM events WHERE id = ?').get(eventId) as any;
+    const { data: event } = await db.from('events').select('name').eq('id', eventId).single();
+    if (!event) throw new Error('Event not found');
     const pdfBuffer = await generateEventReportPDF(eventId);
 
     const mailOptions = {
@@ -415,12 +432,15 @@ export async function sendTicketEmail(ticket: any, event: any, ticketType: any) 
     await transporter.sendMail(mailOptions);
     
     // Update status in DB
-    db.prepare("UPDATE tickets SET email_status = 'SENT', email_sent_at = ? WHERE id = ?").run(new Date().toISOString(), ticket.id);
+    await db.from('tickets').update({ 
+      email_status: 'SENT', 
+      email_sent_at: new Date().toISOString() 
+    }).eq('id', ticket.id);
     
     console.log(`Ticket email with PDF sent to ${ticket.attendee_email}`);
   } catch (error) {
     console.error('Email Send Error:', error);
     // Update status in DB
-    db.prepare("UPDATE tickets SET email_status = 'FAILED' WHERE id = ?").run(ticket.id);
+    await db.from('tickets').update({ email_status: 'FAILED' }).eq('id', ticket.id);
   }
 }

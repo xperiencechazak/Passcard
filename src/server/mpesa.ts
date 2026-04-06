@@ -33,30 +33,39 @@ export async function initiateSTKPush(phone: string, amount: number, paymentId: 
     
     // Simulate STK Push response
     const CheckoutRequestID = 'ws_CO_' + uuidv4().substring(0, 10);
-    db.prepare('UPDATE payments SET checkout_request_id = ?, merchant_request_id = ? WHERE id = ?')
-      .run(CheckoutRequestID, 'SIM-' + uuidv4().substring(0, 8), paymentId);
+    await db.from('payments').update({ 
+      checkout_request_id: CheckoutRequestID, 
+      merchant_request_id: 'SIM-' + uuidv4().substring(0, 8) 
+    }).eq('id', paymentId);
 
-    // Simulate callback after 5 seconds
-    setTimeout(() => {
-      const payment = db.prepare('SELECT * FROM payments WHERE id = ?').get(paymentId) as any;
+    // Simulate callback after 8 seconds
+    setTimeout(async () => {
+      const { data: payment } = await db.from('payments').select('*').eq('id', paymentId).single();
       if (payment && payment.status === 'PENDING') {
-        db.prepare("UPDATE payments SET status = 'COMPLETED' WHERE id = ?").run(paymentId);
+        await db.from('payments').update({ status: 'COMPLETED' }).eq('id', paymentId);
         
         // Generate Ticket
         const ticketId = 'TKT-' + uuidv4().substring(0, 8).toUpperCase();
-        db.prepare(`
-          INSERT INTO tickets (id, payment_id, event_id, ticket_type_id, attendee_name, attendee_email)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(ticketId, paymentId, payment.event_id, payment.ticket_type_id, payment.attendee_name, payment.attendee_email);
+        await db.from('tickets').insert({
+          id: ticketId,
+          payment_id: paymentId,
+          event_id: payment.event_id,
+          ticket_type_id: payment.ticket_type_id,
+          attendee_name: payment.attendee_name,
+          attendee_email: payment.attendee_email
+        });
 
-        // Update sold count
-        db.prepare('UPDATE ticket_types SET sold = sold + 1 WHERE id = ?').run(payment.ticket_type_id);
+        // Update sold count using RPC
+        await db.rpc('increment_sold_count', { tt_id: payment.ticket_type_id });
         
         // Send Email
-        const event = db.prepare('SELECT * FROM events WHERE id = ?').get(payment.event_id);
-        const ticketType = db.prepare('SELECT * FROM ticket_types WHERE id = ?').get(payment.ticket_type_id);
-        const ticket = db.prepare('SELECT * FROM tickets WHERE id = ?').get(ticketId);
-        sendTicketEmail(ticket, event, ticketType).catch(console.error);
+        const { data: event } = await db.from('events').select('*').eq('id', payment.event_id).single();
+        const { data: ticketType } = await db.from('ticket_types').select('*').eq('id', payment.ticket_type_id).single();
+        const { data: ticket } = await db.from('tickets').select('*').eq('id', ticketId).single();
+        
+        if (ticket && event && ticketType) {
+          sendTicketEmail(ticket, event, ticketType).catch(console.error);
+        }
         
         console.log('Simulated M-Pesa payment completed for:', paymentId);
       }
@@ -104,8 +113,10 @@ export async function initiateSTKPush(phone: string, amount: number, paymentId: 
     );
 
     // Update payment with request IDs
-    db.prepare('UPDATE payments SET checkout_request_id = ?, merchant_request_id = ? WHERE id = ?')
-      .run(response.data.CheckoutRequestID, response.data.MerchantRequestID, paymentId);
+    await db.from('payments').update({
+      checkout_request_id: response.data.CheckoutRequestID,
+      merchant_request_id: response.data.MerchantRequestID
+    }).eq('id', paymentId);
 
     return response.data;
   } catch (error: any) {

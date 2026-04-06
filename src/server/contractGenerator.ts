@@ -102,31 +102,37 @@ export async function generateContractPDF(contract: any): Promise<Buffer> {
 
 export async function sendContractEmail(contractId: string) {
   try {
-    const contract = db.prepare(`
-      SELECT c.*, o.name as organizer_name, o.email as organizer_email, o.company_name 
-      FROM contracts c
-      JOIN organizers o ON c.organizer_id = o.id
-      WHERE c.id = ?
-    `).get(contractId) as any;
+    const { data: contract, error: contractError } = await db
+      .from('contracts')
+      .select('*, organizers(name, email, company_name)')
+      .eq('id', contractId)
+      .single();
 
-    if (!contract) throw new Error('Contract not found');
+    if (contractError || !contract) throw new Error('Contract not found');
 
-    const pdfBuffer = await generateContractPDF(contract);
+    const processedContract = {
+      ...contract,
+      organizer_name: contract.organizers?.name,
+      organizer_email: contract.organizers?.email,
+      company_name: contract.organizers?.company_name
+    };
+
+    const pdfBuffer = await generateContractPDF(processedContract);
 
     const mailOptions = {
       from: process.env.EMAIL_FROM,
-      to: contract.organizer_email,
+      to: processedContract.organizer_email,
       bcc: process.env.EMAIL_USER,
-      subject: `Service Agreement - PassCard KE & ${contract.organizer_name}`,
+      subject: `Service Agreement - PassCard KE & ${processedContract.organizer_name}`,
       html: `
         <div style="font-family: sans-serif; max-width: 600px; margin: auto; border: 1px solid #eee; padding: 30px; border-radius: 15px;">
           <h2 style="color: #0A2A66;">Service Agreement</h2>
-          <p>Hi <strong>${contract.organizer_name}</strong>,</p>
+          <p>Hi <strong>${processedContract.organizer_name}</strong>,</p>
           <p>Please find attached the service agreement for our ticketing partnership with PassCard KE.</p>
           <div style="background: #f9f9f9; padding: 20px; border-radius: 10px; margin: 20px 0;">
-            <p style="margin: 5px 0;"><strong>Contract ID:</strong> ${contract.id}</p>
-            <p style="margin: 5px 0;"><strong>Effective Date:</strong> ${contract.effective_date}</p>
-            <p style="margin: 5px 0;"><strong>Pricing:</strong> ${contract.pricing_details}</p>
+            <p style="margin: 5px 0;"><strong>Contract ID:</strong> ${processedContract.id}</p>
+            <p style="margin: 5px 0;"><strong>Effective Date:</strong> ${processedContract.effective_date}</p>
+            <p style="margin: 5px 0;"><strong>Pricing:</strong> ${processedContract.pricing_details}</p>
           </div>
           <p>Please review the attached PDF document. If you have any questions, feel free to reply to this email.</p>
           <p style="margin-top: 30px;">Best regards,<br>The PassCard KE Team</p>
@@ -134,7 +140,7 @@ export async function sendContractEmail(contractId: string) {
       `,
       attachments: [
         {
-          filename: `Agreement_${contract.organizer_name.replace(/\s+/g, '_')}.pdf`,
+          filename: `Agreement_${processedContract.organizer_name.replace(/\s+/g, '_')}.pdf`,
           content: pdfBuffer,
         }
       ],
@@ -143,9 +149,9 @@ export async function sendContractEmail(contractId: string) {
     await transporter.sendMail(mailOptions);
     
     // Update sent_at in DB
-    db.prepare("UPDATE contracts SET sent_at = ? WHERE id = ?").run(new Date().toISOString(), contractId);
+    await db.from('contracts').update({ sent_at: new Date().toISOString() }).eq('id', contractId);
     
-    console.log(`Contract email sent to ${contract.organizer_email}`);
+    console.log(`Contract email sent to ${processedContract.organizer_email}`);
   } catch (error) {
     console.error('Contract Email Send Error:', error);
     throw error;

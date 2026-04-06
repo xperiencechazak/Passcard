@@ -48,9 +48,14 @@ function generateEventCode(): string {
   return code;
 }
 
-function logAdminAction(adminEmail: string, action: string, details: string, eventId?: string) {
+async function logAdminAction(adminEmail: string, action: string, details: string, eventId?: string) {
   try {
-    db.prepare("INSERT INTO admin_logs (admin_email, action, details, event_id) VALUES (?, ?, ?, ?)").run(adminEmail, action, details, eventId || null);
+    await db.from('admin_logs').insert({
+      admin_email: adminEmail,
+      action: action,
+      details: details,
+      event_id: eventId || null
+    });
   } catch (error) {
     console.error('Error logging admin action:', error);
   }
@@ -151,23 +156,6 @@ const adminAuth = async (req: express.Request, res: express.Response, next: expr
 app.use('/api/admin', adminAuth);
 
 async function setupServer() {
-  // --- Migrations ---
-  // Ensure all events have an event_code
-  try {
-    const eventsWithoutCode = db.prepare('SELECT id FROM events WHERE event_code IS NULL').all() as any[];
-    for (const event of eventsWithoutCode) {
-      let eventCode = generateEventCode();
-      let codeExists = db.prepare('SELECT id FROM events WHERE event_code = ?').get(eventCode);
-      while (codeExists) {
-        eventCode = generateEventCode();
-        codeExists = db.prepare('SELECT id FROM events WHERE event_code = ?').get(eventCode);
-      }
-      db.prepare('UPDATE events SET event_code = ? WHERE id = ?').run(eventCode, event.id);
-    }
-  } catch (e) {
-    console.error('Migration error (event_code):', e);
-  }
-
   // --- API Routes ---
 
   // Get Pre-uploaded Images
@@ -176,16 +164,27 @@ async function setupServer() {
   });
 
   // Public Event Submission
-  app.post("/api/events/submit", (req, res) => {
+  app.post("/api/events/submit", async (req, res) => {
     const { name, organizer, organizer_email, venue, date, time, description } = req.body;
     const id = uuidv4();
     const eventCode = generateEventCode();
 
     try {
-      db.prepare(`
-        INSERT INTO events (id, name, organizer, organizer_email, venue, date, time, description, status, event_code, is_hidden)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, 1)
-      `).run(id, name, organizer, organizer_email, venue, date, time, description, eventCode);
+      const { error } = await db.from('events').insert({
+        id,
+        name,
+        organizer,
+        organizer_email,
+        venue,
+        date,
+        time,
+        description,
+        status: 'PENDING',
+        event_code: eventCode,
+        is_hidden: true
+      });
+
+      if (error) throw error;
 
       res.json({ success: true, id });
     } catch (error: any) {
@@ -195,43 +194,55 @@ async function setupServer() {
   });
 
   // Admin: Get Pending Submissions
-  app.get("/api/admin/submissions", (req, res) => {
+  app.get("/api/admin/submissions", async (req, res) => {
     try {
-      const submissions = db.prepare("SELECT * FROM events WHERE status = 'PENDING' ORDER BY created_at DESC").all();
-      res.json(submissions);
+      const { data, error } = await db
+        .from('events')
+        .select('*')
+        .eq('status', 'PENDING')
+        .order('created_at', { ascending: false });
+      
+      if (error) throw error;
+      res.json(data);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
 
   // Admin: Finalize/Complete Event Setup
-  app.put("/api/admin/events/:id/complete-setup", (req, res) => {
+  app.put("/api/admin/events/:id/complete-setup", async (req, res) => {
     const { id } = req.params;
     const { banner_url, is_free, rsvp_limit, ticketTypes, adminEmail } = req.body;
 
     try {
-      const transaction = db.transaction(() => {
-        // Update event details
-        db.prepare(`
-          UPDATE events 
-          SET banner_url = ?, is_free = ?, rsvp_limit = ?, status = 'DRAFT'
-          WHERE id = ?
-        `).run(banner_url, is_free ? 1 : 0, rsvp_limit || null, id);
+      // Update event details
+      const { error: eventError } = await db
+        .from('events')
+        .update({
+          banner_url,
+          is_free: is_free ? true : false,
+          rsvp_limit: rsvp_limit || null,
+          status: 'DRAFT'
+        })
+        .eq('id', id);
 
-        // Add ticket types if not free
-        if (!is_free && ticketTypes && ticketTypes.length > 0) {
-          const insertTicketType = db.prepare(`
-            INSERT INTO ticket_types (id, event_id, name, price, quantity)
-            VALUES (?, ?, ?, ?, ?)
-          `);
-          for (const type of ticketTypes) {
-            insertTicketType.run(uuidv4(), id, type.name, type.price, type.quantity);
-          }
-        }
-      });
+      if (eventError) throw eventError;
 
-      transaction();
-      logAdminAction(adminEmail || 'Admin', 'COMPLETE_EVENT_SETUP', `Completed setup for event ${id}`, id);
+      // Add ticket types if not free
+      if (!is_free && ticketTypes && ticketTypes.length > 0) {
+        const ticketTypesToInsert = ticketTypes.map((type: any) => ({
+          id: uuidv4(),
+          event_id: id,
+          name: type.name,
+          price: type.price,
+          quantity: type.quantity
+        }));
+
+        const { error: ticketError } = await db.from('ticket_types').insert(ticketTypesToInsert);
+        if (ticketError) throw ticketError;
+      }
+
+      await logAdminAction(adminEmail || 'Admin', 'COMPLETE_EVENT_SETUP', `Completed setup for event ${id}`, id);
       res.json({ success: true });
     } catch (error: any) {
       console.error('Complete setup error:', error);
@@ -263,49 +274,71 @@ async function setupServer() {
     const { eventId, attendeeName, attendeeEmail, phoneNumber } = req.body;
     
     try {
-      const event = db.prepare('SELECT * FROM events WHERE id = ?').get(eventId) as any;
-      if (!event) return res.status(404).json({ error: "Event not found" });
+      const { data: event, error: eventError } = await db.from('events').select('*').eq('id', eventId).single();
+      if (eventError || !event) return res.status(404).json({ error: "Event not found" });
       if (!event.is_free) return res.status(400).json({ error: "This is not a free event" });
 
       // Check RSVP limit
       if (event.rsvp_limit) {
-        const currentRSVPs = db.prepare('SELECT COUNT(*) as count FROM tickets WHERE event_id = ?').get(eventId) as any;
-        if (currentRSVPs.count >= event.rsvp_limit) {
+        const { count, error: countError } = await db
+          .from('tickets')
+          .select('*', { count: 'exact', head: true })
+          .eq('event_id', eventId);
+        
+        if (countError) throw countError;
+        if (count !== null && count >= event.rsvp_limit) {
           return res.status(400).json({ error: "RSVP limit reached for this event" });
         }
       }
 
-      const paymentId = 'RSVP-' + uuidv4().substring(0, 8).toUpperCase();
-      const ticketTypeId = 'RSVP-' + eventId; // Virtual ticket type for RSVP
+      const paymentId = uuidv4();
+      const ticketTypeId = '00000000-0000-0000-0000-000000000000'; // Placeholder for RSVP
 
       const yearAlphabet = getYearAlphabet(new Date(event.date).getFullYear());
       const eventCode = event.event_code || String(event.event_number || 0).padStart(3, '0');
       
-      const lastTicket = db.prepare('SELECT MAX(ticket_sequence_number) as max_seq FROM tickets WHERE event_id = ?').get(eventId) as any;
-      const nextSeq = (lastTicket?.max_seq || 0) + 1;
+      const { data: lastTicket, error: lastTicketError } = await db
+        .from('tickets')
+        .select('ticket_sequence_number')
+        .eq('event_id', eventId)
+        .order('ticket_sequence_number', { ascending: false })
+        .limit(1)
+        .single();
+      
+      const nextSeq = (lastTicket?.ticket_sequence_number || 0) + 1;
       const seqStr = String(nextSeq).padStart(4, '0');
       const ticketId = `${yearAlphabet}-${eventCode}-RSVP-${seqStr}`;
 
-      const transaction = db.transaction(() => {
-        // Create a dummy payment record for tracking
-        db.prepare(`
-          INSERT INTO payments (id, phone, amount, quantity, event_id, ticket_type_id, attendee_name, attendee_email, status)
-          VALUES (?, ?, 0, 1, ?, ?, ?, ?, 'COMPLETED')
-        `).run(paymentId, phoneNumber || 'RSVP', eventId, ticketTypeId, attendeeName, attendeeEmail);
-
-        // Create ticket
-        db.prepare(`
-          INSERT INTO tickets (id, payment_id, event_id, ticket_type_id, attendee_name, attendee_email, ticket_sequence_number)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        `).run(ticketId, paymentId, eventId, ticketTypeId, attendeeName, attendeeEmail, nextSeq);
+      // Create a dummy payment record for tracking
+      const { error: paymentError } = await db.from('payments').insert({
+        id: paymentId,
+        phone: phoneNumber || 'RSVP',
+        amount: 0,
+        quantity: 1,
+        event_id: eventId,
+        ticket_type_id: null, // RSVP doesn't have a real ticket type
+        attendee_name: attendeeName,
+        attendee_email: attendeeEmail,
+        status: 'COMPLETED'
       });
 
-      transaction();
+      if (paymentError) throw paymentError;
 
-      const ticket = db.prepare('SELECT * FROM tickets WHERE id = ?').get(ticketId) as any;
+      // Create ticket
+      const { error: ticketError } = await db.from('tickets').insert({
+        id: ticketId,
+        payment_id: paymentId,
+        event_id: eventId,
+        ticket_type_id: null,
+        attendee_name: attendeeName,
+        attendee_email: attendeeEmail,
+        ticket_sequence_number: nextSeq
+      });
+
+      if (ticketError) throw ticketError;
+
       const virtualTicketType = { name: 'Free / RSVP', price: 0 };
-      
-      await sendTicketEmail(ticket, event, virtualTicketType as any);
+      await sendTicketEmail({ id: ticketId, attendee_name: attendeeName, attendee_email: attendeeEmail }, event, virtualTicketType as any);
 
       res.json({ success: true, ticketId });
     } catch (error: any) {
@@ -315,29 +348,44 @@ async function setupServer() {
   });
 
   // Get all events
-  app.get("/api/events", (req, res) => {
+  app.get("/api/events", async (req, res) => {
     try {
-      const events = db.prepare(`
-        SELECT e.*, MIN(tt.price) as min_price,
-               MIN(CASE 
-                 WHEN tt.flash_sale_price IS NOT NULL 
-                 AND datetime('now') BETWEEN tt.flash_sale_start AND tt.flash_sale_end 
-                 THEN tt.flash_sale_price 
-                 ELSE tt.price 
-               END) as current_min_price,
-               MAX(CASE 
-                 WHEN tt.flash_sale_price IS NOT NULL 
-                 AND datetime('now') BETWEEN tt.flash_sale_start AND tt.flash_sale_end 
-                 THEN 1 
-                 ELSE 0 
-               END) as is_flash_sale_active
-        FROM events e
-        LEFT JOIN ticket_types tt ON e.id = tt.event_id
-        WHERE e.status = 'PUBLISHED'
-        GROUP BY e.id
-        ORDER BY e.created_at DESC
-      `).all();
-      res.json(events);
+      const { data: events, error } = await db
+        .from('events')
+        .select('*, ticket_types(*)')
+        .eq('status', 'PUBLISHED')
+        .order('created_at', { ascending: false });
+      
+      if (error) throw error;
+
+      const processedEvents = events.map((event: any) => {
+        let minPrice = Infinity;
+        let currentMinPrice = Infinity;
+        let isFlashSaleActive = false;
+        const now = new Date().toISOString();
+
+        if (event.ticket_types && event.ticket_types.length > 0) {
+          event.ticket_types.forEach((tt: any) => {
+            if (tt.price < minPrice) minPrice = tt.price;
+            
+            let price = tt.price;
+            if (tt.flash_sale_price && now >= tt.flash_sale_start && now <= tt.flash_sale_end) {
+              price = tt.flash_sale_price;
+              isFlashSaleActive = true;
+            }
+            if (price < currentMinPrice) currentMinPrice = price;
+          });
+        }
+
+        return {
+          ...event,
+          min_price: minPrice === Infinity ? 0 : minPrice,
+          current_min_price: currentMinPrice === Infinity ? 0 : currentMinPrice,
+          is_flash_sale_active: isFlashSaleActive ? 1 : 0
+        };
+      });
+
+      res.json(processedEvents);
     } catch (error: any) {
       console.error('Error fetching events:', error);
       res.status(500).json({ error: error.message });
@@ -345,23 +393,30 @@ async function setupServer() {
   });
 
   // Get event details
-  app.get("/api/events/:id", (req, res) => {
+  app.get("/api/events/:id", async (req, res) => {
     try {
-      const event = db.prepare('SELECT * FROM events WHERE id = ?').get(req.params.id) as any;
-      if (!event) return res.status(404).json({ error: "Event not found" });
+      const { data: event, error: eventError } = await db
+        .from('events')
+        .select('*')
+        .eq('id', req.params.id)
+        .single();
       
-      const ticketTypes = db.prepare(`
-        SELECT *, 
-               CASE 
-                 WHEN flash_sale_price IS NOT NULL 
-                 AND datetime('now') BETWEEN flash_sale_start AND flash_sale_end 
-                 THEN 1 
-                 ELSE 0 
-               END as is_flash_sale_active
-        FROM ticket_types 
-        WHERE event_id = ?
-      `).all(req.params.id);
-      res.json({ ...event, ticketTypes });
+      if (eventError || !event) return res.status(404).json({ error: "Event not found" });
+      
+      const { data: ticketTypes, error: ttError } = await db
+        .from('ticket_types')
+        .select('*')
+        .eq('event_id', req.params.id);
+      
+      if (ttError) throw ttError;
+
+      const now = new Date().toISOString();
+      const processedTicketTypes = ticketTypes.map((tt: any) => ({
+        ...tt,
+        is_flash_sale_active: (tt.flash_sale_price && now >= tt.flash_sale_start && now <= tt.flash_sale_end) ? 1 : 0
+      }));
+
+      res.json({ ...event, ticketTypes: processedTicketTypes });
     } catch (error: any) {
       console.error('Error fetching event details:', error);
       res.status(500).json({ error: error.message });
@@ -375,12 +430,13 @@ async function setupServer() {
 
     try {
       // Verify amount with flash sale logic
-      const ticketType = db.prepare(`
-        SELECT price, flash_sale_price, flash_sale_start, flash_sale_end 
-        FROM ticket_types WHERE id = ?
-      `).get(ticketTypeId) as any;
+      const { data: ticketType, error: ttError } = await db
+        .from('ticket_types')
+        .select('price, flash_sale_price, flash_sale_start, flash_sale_end')
+        .eq('id', ticketTypeId)
+        .single();
 
-      if (!ticketType) throw new Error("Invalid ticket type");
+      if (ttError || !ticketType) throw new Error("Invalid ticket type");
 
       let expectedPrice = ticketType.price;
       const now = new Date().toISOString();
@@ -390,8 +446,8 @@ async function setupServer() {
 
       let discountAmount = 0;
       if (couponId) {
-        const coupon = db.prepare("SELECT * FROM coupons WHERE id = ?").get(couponId) as any;
-        if (coupon) {
+        const { data: coupon, error: couponError } = await db.from('coupons').select('*').eq('id', couponId).single();
+        if (!couponError && coupon) {
           discountAmount = Math.floor((expectedPrice * (quantity || 1) * coupon.discount_percentage) / 100);
         }
       }
@@ -402,10 +458,20 @@ async function setupServer() {
         console.warn(`Price mismatch: Expected ${finalExpectedAmount}, got ${amount}`);
       }
 
-      db.prepare(`
-        INSERT INTO payments (id, phone, amount, quantity, event_id, ticket_type_id, attendee_name, attendee_email, coupon_id, discount_amount)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(paymentId, phoneNumber, amount, quantity || 1, eventId, ticketTypeId, attendeeName, attendeeEmail, couponId || null, discountAmount);
+      const { error: insertError } = await db.from('payments').insert({
+        id: paymentId,
+        phone: phoneNumber,
+        amount: amount,
+        quantity: quantity || 1,
+        event_id: eventId,
+        ticket_type_id: ticketTypeId,
+        attendee_name: attendeeName,
+        attendee_email: attendeeEmail,
+        coupon_id: couponId || null,
+        discount_amount: discountAmount
+      });
+
+      if (insertError) throw insertError;
 
       const mpesaResponse = await initiateSTKPush(phoneNumber, amount, paymentId);
       res.json({ paymentId, ...mpesaResponse });
@@ -416,23 +482,29 @@ async function setupServer() {
   });
 
   // Check Payment Status
-  app.get("/api/payment-status/:requestId", (req, res) => {
+  app.get("/api/payment-status/:requestId", async (req, res) => {
     const requestId = req.params.requestId;
-    const payment = db.prepare('SELECT * FROM payments WHERE checkout_request_id = ? OR id = ?').get(requestId, requestId) as any;
+    const { data: payment, error } = await db
+      .from('payments')
+      .select('*')
+      .or(`checkout_request_id.eq.${requestId},id.eq.${requestId}`)
+      .single();
     
-    if (!payment) return res.status(404).json({ error: "Payment not found" });
+    if (error || !payment) return res.status(404).json({ error: "Payment not found" });
     
     let ticketIds = [];
     if (payment.status === 'COMPLETED') {
-      const tickets = db.prepare('SELECT id FROM tickets WHERE payment_id = ?').all(payment.id) as any[];
-      ticketIds = tickets.map(t => t.id);
+      const { data: tickets, error: ticketError } = await db.from('tickets').select('id').eq('payment_id', payment.id);
+      if (!ticketError && tickets) {
+        ticketIds = tickets.map(t => t.id);
+      }
     }
     
     res.json({ 
       status: payment.status === 'COMPLETED' ? 'SUCCESS' : 
               payment.status === 'FAILED' ? 'ERROR' : 'PENDING', 
       ticketIds,
-      ticketId: ticketIds[0] || null, // For backward compatibility
+      ticketId: ticketIds[0] || null,
       message: payment.status === 'FAILED' ? 'Payment was cancelled or failed.' : null
     });
   });
@@ -448,43 +520,60 @@ async function setupServer() {
 
     if (resultCode === 0) {
       // Success
-      const payment = db.prepare('SELECT * FROM payments WHERE checkout_request_id = ?').get(checkoutRequestId) as any;
-      if (payment) {
-        db.prepare("UPDATE payments SET status = 'COMPLETED' WHERE id = ?").run(payment.id);
+      const { data: payment, error: paymentError } = await db
+        .from('payments')
+        .select('*')
+        .eq('checkout_request_id', checkoutRequestId)
+        .single();
+      
+      if (!paymentError && payment) {
+        await db.from('payments').update({ status: 'COMPLETED' }).eq('id', payment.id);
 
         const quantity = payment.quantity || 1;
         const generatedTickets = [];
 
-        const event = db.prepare('SELECT * FROM events WHERE id = ?').get(payment.event_id) as any;
-        const ticketType = db.prepare('SELECT * FROM ticket_types WHERE id = ?').get(payment.ticket_type_id) as any;
+        const { data: event } = await db.from('events').select('*').eq('id', payment.event_id).single();
+        const { data: ticketType } = await db.from('ticket_types').select('*').eq('id', payment.ticket_type_id).single();
 
         const yearAlphabet = getYearAlphabet(new Date(event.date).getFullYear());
         const eventCode = event.event_code || String(event.event_number || 0).padStart(3, '0');
         
-        // Get current max sequence for this ticket type
-        const lastTicket = db.prepare('SELECT MAX(ticket_sequence_number) as max_seq FROM tickets WHERE ticket_type_id = ?').get(payment.ticket_type_id) as any;
-        let nextSeq = (lastTicket?.max_seq || 0) + 1;
+        const { data: lastTicket } = await db
+          .from('tickets')
+          .select('ticket_sequence_number')
+          .eq('ticket_type_id', payment.ticket_type_id)
+          .order('ticket_sequence_number', { ascending: false })
+          .limit(1)
+          .single();
+        
+        let nextSeq = (lastTicket?.ticket_sequence_number || 0) + 1;
 
         for (let i = 0; i < quantity; i++) {
           const seqStr = String(nextSeq).padStart(4, '0');
           const ticketId = `${yearAlphabet}-${eventCode}-${ticketType.name.substring(0, 3).toUpperCase()}-${seqStr}`;
           
-          db.prepare(`
-            INSERT INTO tickets (id, payment_id, event_id, ticket_type_id, attendee_name, attendee_email, ticket_sequence_number)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-          `).run(ticketId, payment.id, payment.event_id, payment.ticket_type_id, payment.attendee_name, payment.attendee_email, nextSeq);
+          const { data: ticket, error: ticketError } = await db.from('tickets').insert({
+            id: ticketId,
+            payment_id: payment.id,
+            event_id: payment.event_id,
+            ticket_type_id: payment.ticket_type_id,
+            attendee_name: payment.attendee_name,
+            attendee_email: payment.attendee_email,
+            ticket_sequence_number: nextSeq
+          }).select().single();
           
-          const ticket = db.prepare('SELECT * FROM tickets WHERE id = ?').get(ticketId);
-          generatedTickets.push(ticket);
+          if (!ticketError && ticket) {
+            generatedTickets.push(ticket);
+          }
           nextSeq++;
         }
 
         // Update sold count
-        db.prepare('UPDATE ticket_types SET sold = sold + ? WHERE id = ?').run(quantity, payment.ticket_type_id);
+        await db.rpc('increment_sold_count', { tt_id: payment.ticket_type_id, qty: quantity });
 
         // Update coupon usage if applicable
         if (payment.coupon_id) {
-          db.prepare('UPDATE coupons SET used_count = used_count + 1 WHERE id = ?').run(payment.coupon_id);
+          await db.rpc('increment_coupon_usage', { c_id: payment.coupon_id });
         }
 
         // Send Emails for all tickets
@@ -494,14 +583,14 @@ async function setupServer() {
       }
     } else {
       // Failed
-      db.prepare("UPDATE payments SET status = 'FAILED' WHERE checkout_request_id = ?").run(checkoutRequestId);
+      await db.from('payments').update({ status: 'FAILED' }).eq('checkout_request_id', checkoutRequestId);
     }
 
     res.json({ ResultCode: 0, ResultDesc: "Success" });
   });
 
   // Verify Ticket
-  app.post("/api/verify", (req, res) => {
+  app.post("/api/verify", async (req, res) => {
     const { ticketId } = req.body;
     const normalizedTicketId = ticketId?.trim()?.toUpperCase();
     
@@ -509,27 +598,28 @@ async function setupServer() {
       return res.status(400).json({ status: 'INVALID', message: 'Ticket ID is required' });
     }
 
-    const ticket = db.prepare(`
-      SELECT t.*, e.name as event_name, tt.name as ticket_type_name 
-      FROM tickets t
-      JOIN events e ON t.event_id = e.id
-      LEFT JOIN ticket_types tt ON t.ticket_type_id = tt.id
-      WHERE UPPER(t.id) = ?
-    `).get(normalizedTicketId) as any;
+    const { data: ticket, error } = await db
+      .from('tickets')
+      .select('*, events(name), ticket_types(name)')
+      .ilike('id', normalizedTicketId)
+      .single();
 
-    if (!ticket) {
+    if (error || !ticket) {
       return res.json({ status: 'INVALID', message: 'Invalid Ticket' });
     }
 
-    const ticketTypeName = ticket.ticket_type_name || 'Free / RSVP';
+    const ticketTypeName = ticket.ticket_types?.name || 'Free / RSVP';
 
     if (ticket.deleted_at) {
       return res.json({ status: 'INVALID', message: 'Ticket has been cancelled/deleted' });
     }
 
     if (ticket.status === 'USED') {
-      // Log failed attempt
-      db.prepare("INSERT INTO scan_logs (ticket_id, status, message) VALUES (?, ?, ?)").run(ticketId, 'ALREADY_USED', 'Attempted to use an already scanned ticket');
+      await db.from('scan_logs').insert({
+        ticket_id: ticketId,
+        status: 'ALREADY_USED',
+        message: 'Attempted to use an already scanned ticket'
+      });
       
       return res.json({ 
         status: 'USED', 
@@ -541,95 +631,127 @@ async function setupServer() {
 
     // Mark as used
     const now = new Date().toISOString();
-    db.prepare("UPDATE tickets SET status = 'USED', scan_time = ? WHERE id = ?").run(now, ticketId);
+    await db.from('tickets').update({ status: 'USED', scan_time: now }).eq('id', ticketId);
     
     // Log successful scan
-    db.prepare("INSERT INTO scan_logs (ticket_id, status, message) VALUES (?, ?, ?)").run(ticketId, 'SUCCESS', 'Access Granted');
+    await db.from('scan_logs').insert({
+      ticket_id: ticketId,
+      status: 'SUCCESS',
+      message: 'Access Granted'
+    });
 
     res.json({ 
       status: 'VALID', 
       message: 'Access Granted',
       attendee_name: ticket.attendee_name,
-      event_name: ticket.event_name,
+      event_name: ticket.events?.name,
       ticket_type: ticketTypeName
     });
   });
 
   // User: Get tickets by email
-  app.get("/api/my-tickets", (req, res) => {
+  app.get("/api/my-tickets", async (req, res) => {
     const email = req.query.email as string;
     if (!email) return res.status(400).json({ error: "Email is required" });
     
     try {
-      const tickets = db.prepare(`
-        SELECT t.*, e.name as event_name, e.date as event_date, e.time as event_time, e.venue as event_venue, e.banner_url as event_banner, tt.name as ticket_type_name, tt.price as ticket_price
-        FROM tickets t
-        JOIN events e ON t.event_id = e.id
-        LEFT JOIN ticket_types tt ON t.ticket_type_id = tt.id
-        WHERE t.attendee_email = ?
-        ORDER BY t.created_at DESC
-      `).all(email);
-      res.json(tickets);
+      const { data: tickets, error } = await db
+        .from('tickets')
+        .select('*, events(name, date, time, venue, banner_url), ticket_types(name, price)')
+        .eq('attendee_email', email)
+        .order('created_at', { ascending: false });
+      
+      if (error) throw error;
+      
+      const processedTickets = tickets.map((t: any) => ({
+        ...t,
+        event_name: t.events?.name,
+        event_date: t.events?.date,
+        event_time: t.events?.time,
+        event_venue: t.events?.venue,
+        event_banner: t.events?.banner_url,
+        ticket_type_name: t.ticket_types?.name,
+        ticket_price: t.ticket_types?.price
+      }));
+
+      res.json(processedTickets);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
 
   // Admin: Get event-specific activities
-  app.get("/api/admin/event-activities", (req, res) => {
+  app.get("/api/admin/event-activities", async (req, res) => {
     const includeInactive = req.query.includeInactive === 'true';
     try {
-      const events = db.prepare(`
-        SELECT id, name, date, is_hidden 
-        FROM events 
-        ${includeInactive ? '' : 'WHERE is_hidden = 0'}
-        ORDER BY created_at DESC
-      `).all() as any[];
+      let query = db.from('events').select('id, name, date, is_hidden');
+      if (!includeInactive) {
+        query = query.eq('is_hidden', false);
+      }
+      const { data: events, error: eventsError } = await query.order('created_at', { ascending: false });
 
-      const eventActivities = events.map(event => {
+      if (eventsError) throw eventsError;
+
+      const eventActivities = await Promise.all((events || []).map(async (event) => {
         // Get ticket creations (purchases/manual)
-        const tickets = db.prepare(`
-          SELECT 'TICKET_CREATED' as type, attendee_name as attendee, created_at as timestamp, 'Ticket generated' as details
-          FROM tickets 
-          WHERE event_id = ?
-          ORDER BY created_at DESC LIMIT 20
-        `).all(event.id) as any[];
+        const { data: tickets } = await db.from('tickets')
+          .select('attendee_name, created_at')
+          .eq('event_id', event.id)
+          .order('created_at', { ascending: false })
+          .limit(20);
+
+        const ticketActivities = (tickets || []).map(t => ({
+          type: 'TICKET_CREATED',
+          attendee: t.attendee_name,
+          timestamp: t.created_at,
+          details: 'Ticket generated'
+        }));
 
         // Get scans
-        const scans = db.prepare(`
-          SELECT 'TICKET_SCANNED' as type, t.attendee_name as attendee, sl.scanned_at as timestamp, sl.message as details
-          FROM scan_logs sl
-          JOIN tickets t ON sl.ticket_id = t.id
-          WHERE t.event_id = ?
-          ORDER BY sl.scanned_at DESC LIMIT 20
-        `).all(event.id) as any[];
+        const { data: scans } = await db.from('scan_logs')
+          .select('scanned_at, message, tickets(attendee_name)')
+          .eq('tickets.event_id', event.id)
+          .order('scanned_at', { ascending: false })
+          .limit(20);
+
+        const scanActivities = (scans || []).map((s: any) => ({
+          type: 'TICKET_SCANNED',
+          attendee: s.tickets?.attendee_name,
+          timestamp: s.scanned_at,
+          details: s.message
+        }));
 
         // Get admin logs
-        const adminLogs = db.prepare(`
-          SELECT 'ADMIN_ACTION' as type, admin_email as attendee, created_at as timestamp, action || ': ' || details as details
-          FROM admin_logs
-          WHERE event_id = ?
-          ORDER BY created_at DESC LIMIT 20
-        `).all(event.id) as any[];
+        const { data: adminLogs } = await db.from('admin_logs')
+          .select('admin_email, created_at, action, details')
+          .eq('event_id', event.id)
+          .order('created_at', { ascending: false })
+          .limit(20);
+
+        const adminActivities = (adminLogs || []).map(l => ({
+          type: 'ADMIN_ACTION',
+          attendee: l.admin_email,
+          timestamp: l.created_at,
+          details: `${l.action}: ${l.details}`
+        }));
 
         // Combine and sort
-        const allActivities = [...tickets, ...scans, ...adminLogs]
+        const allActivities = [...ticketActivities, ...scanActivities, ...adminActivities]
           .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
           .slice(0, 50);
 
         // Get scan stats for this event
-        const scanStats = db.prepare(`
-          SELECT COUNT(*) as total_scanned
-          FROM tickets
-          WHERE event_id = ? AND status = 'USED'
-        `).get(event.id) as any;
+        const { count: totalScanned } = await db.from('tickets')
+          .select('*', { count: 'exact', head: true })
+          .eq('event_id', event.id)
+          .eq('status', 'USED');
 
         return {
           ...event,
           activities: allActivities,
-          total_scanned: scanStats.total_scanned || 0
+          total_scanned: totalScanned || 0
         };
-      });
+      }));
 
       res.json(eventActivities);
     } catch (error: any) {
@@ -638,36 +760,66 @@ async function setupServer() {
   });
 
   // Admin: Get all tickets
-  app.get("/api/admin/tickets", (req, res) => {
+  app.get("/api/admin/tickets", async (req, res) => {
     const includeDeleted = req.query.includeDeleted === 'true';
-    const query = `
-      SELECT t.*, e.name as event_name, tt.name as ticket_type_name, p.mpesa_receipt_number, p.amount as total_amount, p.discount_amount, p.quantity, c.code as coupon_code
-      FROM tickets t
-      JOIN events e ON t.event_id = e.id
-      LEFT JOIN ticket_types tt ON t.ticket_type_id = tt.id
-      JOIN payments p ON t.payment_id = p.id
-      LEFT JOIN coupons c ON p.coupon_id = c.id
-      ${includeDeleted ? '' : 'WHERE t.deleted_at IS NULL'}
-      ORDER BY t.created_at DESC
-    `;
-    const tickets = db.prepare(query).all();
-    res.json(tickets);
+    try {
+      let query = db.from('tickets')
+        .select(`
+          *,
+          events(name),
+          ticket_types(name),
+          payments(mpesa_receipt_number, amount, discount_amount, quantity, coupons(code))
+        `);
+      
+      if (!includeDeleted) {
+        query = query.is('deleted_at', null);
+      }
+
+      const { data: tickets, error } = await query.order('created_at', { ascending: false });
+      
+      if (error) throw error;
+
+      const processedTickets = (tickets || []).map((t: any) => ({
+        ...t,
+        event_name: t.events?.name,
+        ticket_type_name: t.ticket_types?.name,
+        mpesa_receipt_number: t.payments?.mpesa_receipt_number,
+        total_amount: t.payments?.amount,
+        discount_amount: t.payments?.discount_amount,
+        quantity: t.payments?.quantity,
+        coupon_code: t.payments?.coupons?.code
+      }));
+
+      res.json(processedTickets);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
   });
 
   // Admin: Delete Ticket (Soft Delete)
-  app.delete("/api/admin/tickets/:id", (req, res) => {
+  app.delete("/api/admin/tickets/:id", async (req, res) => {
     const ticketId = req.params.id;
     try {
-      const ticket = db.prepare('SELECT status, event_id, attendee_name FROM tickets WHERE id = ?').get(ticketId) as any;
-      if (!ticket) return res.status(404).json({ error: "Ticket not found" });
+      const { data: ticket, error: fetchError } = await db
+        .from('tickets')
+        .select('status, event_id, attendee_name')
+        .eq('id', ticketId)
+        .single();
 
-      // Optional: Prevent deletion of used tickets
+      if (fetchError || !ticket) return res.status(404).json({ error: "Ticket not found" });
+
       if (ticket.status === 'USED') {
         return res.status(400).json({ error: "Cannot delete a ticket that has already been used." });
       }
 
-      db.prepare("UPDATE tickets SET deleted_at = ? WHERE id = ?").run(new Date().toISOString(), ticketId);
-      logAdminAction(req.body.adminEmail || 'Admin', 'DELETE_TICKET', `Deleted ticket ${ticketId} for ${ticket.attendee_name}`, ticket.event_id);
+      const { error: updateError } = await db
+        .from('tickets')
+        .update({ deleted_at: new Date().toISOString() })
+        .eq('id', ticketId);
+
+      if (updateError) throw updateError;
+
+      await logAdminAction(req.body.adminEmail || 'Admin', 'DELETE_TICKET', `Deleted ticket ${ticketId} for ${ticket.attendee_name}`, ticket.event_id);
       res.json({ success: true, message: "Ticket deleted successfully" });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -675,10 +827,15 @@ async function setupServer() {
   });
 
   // Admin: Restore Ticket
-  app.post("/api/admin/tickets/:id/restore", (req, res) => {
+  app.post("/api/admin/tickets/:id/restore", async (req, res) => {
     const ticketId = req.params.id;
     try {
-      db.prepare("UPDATE tickets SET deleted_at = NULL WHERE id = ?").run(ticketId);
+      const { error } = await db
+        .from('tickets')
+        .update({ deleted_at: null })
+        .eq('id', ticketId);
+
+      if (error) throw error;
       res.json({ success: true, message: "Ticket restored successfully" });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -686,70 +843,101 @@ async function setupServer() {
   });
 
   // Admin: Get Scan Logs
-  app.get("/api/admin/scan-logs", (req, res) => {
+  app.get("/api/admin/scan-logs", async (req, res) => {
     try {
-      const logs = db.prepare(`
-        SELECT sl.*, t.attendee_name, e.name as event_name
-        FROM scan_logs sl
-        JOIN tickets t ON sl.ticket_id = t.id
-        JOIN events e ON t.event_id = e.id
-        ORDER BY sl.scanned_at DESC
-        LIMIT 100
-      `).all();
-      res.json(logs);
+      const { data: logs, error } = await db
+        .from('scan_logs')
+        .select(`
+          *,
+          tickets(attendee_name, events(name))
+        `)
+        .order('scanned_at', { ascending: false })
+        .limit(100);
+
+      if (error) throw error;
+
+      const processedLogs = (logs || []).map((l: any) => ({
+        ...l,
+        attendee_name: l.tickets?.attendee_name,
+        event_name: l.tickets?.events?.name
+      }));
+
+      res.json(processedLogs);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
 
   // Admin: Manually Add Ticket
-  app.post("/api/admin/tickets", (req, res) => {
+  app.post("/api/admin/tickets", async (req, res) => {
     const { eventId, ticketTypeId, name, email, amount, manualTicketId, mpesaReceiptNumber } = req.body;
     
     try {
-      const event = db.prepare('SELECT * FROM events WHERE id = ?').get(eventId) as any;
-      const ticketType = db.prepare('SELECT * FROM ticket_types WHERE id = ?').get(ticketTypeId) as any;
+      const { data: event } = await db.from('events').select('*').eq('id', eventId).single();
+      const { data: ticketType } = await db.from('ticket_types').select('*').eq('id', ticketTypeId).single();
       
       if (!event || !ticketType) return res.status(404).json({ error: "Event or Ticket Type not found" });
 
       const yearAlphabet = getYearAlphabet(new Date(event.date).getFullYear());
       const eventCode = event.event_code || String(event.event_number || 0).padStart(3, '0');
       
-      const lastTicket = db.prepare('SELECT MAX(ticket_sequence_number) as max_seq FROM tickets WHERE ticket_type_id = ?').get(ticketTypeId) as any;
-      const nextSeq = (lastTicket?.max_seq || 0) + 1;
+      const { data: lastTicket } = await db
+        .from('tickets')
+        .select('ticket_sequence_number')
+        .eq('ticket_type_id', ticketTypeId)
+        .order('ticket_sequence_number', { ascending: false })
+        .limit(1)
+        .single();
+
+      const nextSeq = (lastTicket?.ticket_sequence_number || 0) + 1;
       const seqStr = String(nextSeq).padStart(4, '0');
       
       const ticketId = manualTicketId || `${yearAlphabet}-${eventCode}-${ticketType.name.substring(0, 3).toUpperCase()}-${seqStr}`;
       const paymentId = 'MANUAL-' + uuidv4().substring(0, 8).toUpperCase();
 
       // Check if ticketId already exists
-      const existing = db.prepare("SELECT id FROM tickets WHERE id = ?").get(ticketId);
+      const { data: existing } = await db.from('tickets').select('id').eq('id', ticketId).single();
       if (existing) {
         return res.status(400).json({ error: "Ticket ID already exists. Please use a unique ID." });
       }
 
-      const transaction = db.transaction(() => {
-        // Create payment record
-        db.prepare(`
-          INSERT INTO payments (id, phone, amount, event_id, ticket_type_id, attendee_name, attendee_email, status, mpesa_receipt_number)
-          VALUES (?, ?, ?, ?, ?, ?, ?, 'COMPLETED', ?)
-        `).run(paymentId, 'MANUAL', amount, eventId, ticketTypeId, name, email, mpesaReceiptNumber || null);
-
-        // Create ticket record
-        db.prepare(`
-          INSERT INTO tickets (id, payment_id, event_id, ticket_type_id, attendee_name, attendee_email, status, ticket_sequence_number)
-          VALUES (?, ?, ?, ?, ?, ?, 'VALID', ?)
-        `).run(ticketId, paymentId, eventId, ticketTypeId, name, email, nextSeq);
-
-        // Update sold count
-        db.prepare('UPDATE ticket_types SET sold = sold + 1 WHERE id = ?').run(ticketTypeId);
+      // Create payment record
+      const { error: paymentError } = await db.from('payments').insert({
+        id: paymentId,
+        phone: 'MANUAL',
+        amount: amount,
+        event_id: eventId,
+        ticket_type_id: ticketTypeId,
+        attendee_name: name,
+        attendee_email: email,
+        status: 'COMPLETED',
+        mpesa_receipt_number: mpesaReceiptNumber || null
       });
 
-      transaction();
+      if (paymentError) throw paymentError;
+
+      // Create ticket record
+      const { error: ticketError } = await db.from('tickets').insert({
+        id: ticketId,
+        payment_id: paymentId,
+        event_id: eventId,
+        ticket_type_id: ticketTypeId,
+        attendee_name: name,
+        attendee_email: email,
+        status: 'VALID',
+        ticket_sequence_number: nextSeq
+      });
+
+      if (ticketError) throw ticketError;
+
+      // Update sold count
+      await db.rpc('increment_sold_count', { tt_id: ticketTypeId });
 
       // Send Email
-      const ticket = db.prepare('SELECT * FROM tickets WHERE id = ?').get(ticketId);
-      sendTicketEmail(ticket, event, ticketType).catch(console.error);
+      const { data: ticket } = await db.from('tickets').select('*').eq('id', ticketId).single();
+      if (ticket) {
+        sendTicketEmail(ticket, event, ticketType).catch(console.error);
+      }
 
       res.json({ success: true, ticketId });
     } catch (error: any) {
@@ -758,16 +946,18 @@ async function setupServer() {
   });
 
   // Admin: Resend Ticket Email
-  app.post("/api/admin/tickets/resend", (req, res) => {
+  app.post("/api/admin/tickets/resend", async (req, res) => {
     const { ticketId } = req.body;
     try {
-      const ticket = db.prepare('SELECT * FROM tickets WHERE id = ?').get(ticketId) as any;
+      const { data: ticket } = await db.from('tickets').select('*').eq('id', ticketId).single();
       if (!ticket) return res.status(404).json({ error: "Ticket not found" });
 
-      const event = db.prepare('SELECT * FROM events WHERE id = ?').get(ticket.event_id);
-      const ticketType = db.prepare('SELECT * FROM ticket_types WHERE id = ?').get(ticket.ticket_type_id);
+      const { data: event } = await db.from('events').select('*').eq('id', ticket.event_id).single();
+      const { data: ticketType } = await db.from('ticket_types').select('*').eq('id', ticket.ticket_type_id).single();
 
-      sendTicketEmail(ticket, event, ticketType).catch(console.error);
+      if (ticket && event && ticketType) {
+        sendTicketEmail(ticket, event, ticketType).catch(console.error);
+      }
       res.json({ success: true, message: "Email resend initiated" });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -778,17 +968,20 @@ async function setupServer() {
   app.get("/api/tickets/:id/download", async (req, res) => {
     const ticketId = req.params.id;
     try {
-      const ticket = db.prepare('SELECT * FROM tickets WHERE id = ?').get(ticketId) as any;
+      const { data: ticket } = await db.from('tickets').select('*').eq('id', ticketId).single();
       if (!ticket) return res.status(404).json({ error: "Ticket not found" });
 
-      const event = db.prepare('SELECT * FROM events WHERE id = ?').get(ticket.event_id);
-      const ticketType = db.prepare('SELECT * FROM ticket_types WHERE id = ?').get(ticket.ticket_type_id);
+      const { data: event } = await db.from('events').select('*').eq('id', ticket.event_id).single();
+      const { data: ticketType } = await db.from('ticket_types').select('*').eq('id', ticket.ticket_type_id).single();
 
-      const pdfBuffer = await generateTicketPDF(ticket, event, ticketType);
-
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename=Ticket-${ticketId}.pdf`);
-      res.send(pdfBuffer);
+      if (ticket && event && ticketType) {
+        const pdfBuffer = await generateTicketPDF(ticket, event, ticketType);
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename=Ticket-${ticketId}.pdf`);
+        res.send(pdfBuffer);
+      } else {
+        res.status(404).json({ error: "Related data not found" });
+      }
     } catch (error: any) {
       console.error('Download Error:', error);
       res.status(500).json({ error: error.message });
@@ -799,8 +992,8 @@ async function setupServer() {
   app.get("/api/admin/events/:id/report", async (req, res) => {
     const eventId = req.params.id;
     try {
-      const event = db.prepare('SELECT name FROM events WHERE id = ?').get(eventId) as any;
-      if (!event) return res.status(404).json({ error: "Event not found" });
+      const { data: event, error } = await db.from('events').select('name').eq('id', eventId).single();
+      if (error || !event) return res.status(404).json({ error: "Event not found" });
 
       const pdfBuffer = await generateEventReportPDF(eventId);
 
@@ -831,11 +1024,11 @@ async function setupServer() {
     const eventId = req.params.id;
     const adminEmail = req.body.adminEmail || 'Admin';
     try {
-      const event = db.prepare('SELECT * FROM events WHERE id = ?').get(eventId) as any;
-      if (!event) return res.status(404).json({ error: "Event not found" });
+      const { data: event, error } = await db.from('events').select('*').eq('id', eventId).single();
+      if (error || !event) return res.status(404).json({ error: "Event not found" });
 
-      db.prepare("UPDATE events SET is_completed = 1, is_hidden = 1 WHERE id = ?").run(eventId);
-      logAdminAction(adminEmail, 'COMPLETE_EVENT', `Marked event ${eventId} as completed`, eventId);
+      await db.from('events').update({ is_completed: true, is_hidden: true }).eq('id', eventId);
+      await logAdminAction(adminEmail, 'COMPLETE_EVENT', `Marked event ${eventId} as completed`, eventId);
       
       // Automatically send report to admin
       if (process.env.EMAIL_USER) {
@@ -849,66 +1042,85 @@ async function setupServer() {
   });
 
   // Admin: Get Stats
-  app.get("/api/admin/stats", (req, res) => {
-    const totalSales = db.prepare("SELECT SUM(amount) as total FROM payments WHERE status = 'COMPLETED'").get() as any;
-    const paidTickets = db.prepare(`
-      SELECT COUNT(*) as count 
-      FROM tickets t 
-      JOIN events e ON t.event_id = e.id 
-      WHERE e.is_free = 0
-    `).get() as any;
-    const totalRSVPs = db.prepare(`
-      SELECT COUNT(*) as count 
-      FROM tickets t 
-      JOIN events e ON t.event_id = e.id 
-      WHERE e.is_free = 1
-    `).get() as any;
-    const recentTickets = db.prepare(`
-      SELECT t.*, e.name as event_name 
-      FROM tickets t 
-      JOIN events e ON t.event_id = e.id 
-      ORDER BY t.created_at DESC LIMIT 10
-    `).all();
+  app.get("/api/admin/stats", async (req, res) => {
+    try {
+      const { data: payments } = await db.from('payments').select('amount').eq('status', 'COMPLETED');
+      const totalRevenue = payments?.reduce((sum, p) => sum + (p.amount || 0), 0) || 0;
 
-    res.json({
-      revenue: totalSales.total || 0,
-      ticketsSold: paidTickets.count,
-      totalRSVPs: totalRSVPs.count,
-      recentTickets
-    });
+      const { count: paidTicketsCount } = await db
+        .from('tickets')
+        .select('*, events!inner(is_free)', { count: 'exact', head: true })
+        .eq('events.is_free', false);
+
+      const { count: rsvpsCount } = await db
+        .from('tickets')
+        .select('*, events!inner(is_free)', { count: 'exact', head: true })
+        .eq('events.is_free', true);
+
+      const { data: recentTickets } = await db
+        .from('tickets')
+        .select('*, events(name)')
+        .order('created_at', { ascending: false })
+        .limit(10);
+
+      res.json({
+        revenue: totalRevenue,
+        ticketsSold: paidTicketsCount || 0,
+        totalRSVPs: rsvpsCount || 0,
+        recentTickets: recentTickets?.map(t => ({ ...t, event_name: t.events?.name })) || []
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
   });
 
   // Admin: Get all events with sales data
-  app.get("/api/admin/events", (req, res) => {
-    const events = db.prepare(`
-      SELECT e.*, 
-             CASE 
-               WHEN e.is_free = 1 THEN e.rsvp_limit 
-               ELSE (SELECT COALESCE(SUM(quantity), 0) FROM ticket_types WHERE event_id = e.id) 
-             END as total_capacity,
-             CASE 
-               WHEN e.is_free = 1 THEN 0
-               ELSE (SELECT COALESCE(SUM(sold), 0) FROM ticket_types WHERE event_id = e.id) 
-             END as total_sold,
-             CASE 
-               WHEN e.is_free = 1 THEN (SELECT COUNT(*) FROM tickets WHERE event_id = e.id)
-               ELSE 0
-             END as total_rsvps,
-             (SELECT COUNT(*) FROM tickets WHERE event_id = e.id AND status = 'USED') as total_checked_in
-      FROM events e
-      ORDER BY e.created_at DESC
-    `).all();
-    res.json(events);
+  app.get("/api/admin/events", async (req, res) => {
+    try {
+      const { data: events, error } = await db
+        .from('events')
+        .select('*, ticket_types(quantity, sold), tickets(status)')
+        .order('created_at', { ascending: false });
+      
+      if (error) throw error;
+
+      const processedEvents = events.map((e: any) => {
+        let totalCapacity = 0;
+        let totalSold = 0;
+        let totalRSVPs = 0;
+        let totalCheckedIn = e.tickets?.filter((t: any) => t.status === 'USED').length || 0;
+
+        if (e.is_free) {
+          totalCapacity = e.rsvp_limit || 0;
+          totalRSVPs = e.tickets?.length || 0;
+        } else {
+          e.ticket_types?.forEach((tt: any) => {
+            totalCapacity += tt.quantity || 0;
+            totalSold += tt.sold || 0;
+          });
+        }
+
+        return {
+          ...e,
+          total_capacity: totalCapacity,
+          total_sold: totalSold,
+          total_rsvps: totalRSVPs,
+          total_checked_in: totalCheckedIn
+        };
+      });
+
+      res.json(processedEvents);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
   });
 
   // Admin: Delete Event
-  app.delete("/api/admin/events/:id", (req, res) => {
+  app.delete("/api/admin/events/:id", async (req, res) => {
     try {
-      const transaction = db.transaction(() => {
-        db.prepare('DELETE FROM ticket_types WHERE event_id = ?').run(req.params.id);
-        db.prepare('DELETE FROM events WHERE id = ?').run(req.params.id);
-      });
-      transaction();
+      // Supabase handles cascade deletes if configured in DB
+      const { error } = await db.from('events').delete().eq('id', req.params.id);
+      if (error) throw error;
       res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -916,12 +1128,12 @@ async function setupServer() {
   });
 
   // Admin: Hide Event (Soft Delete from public page)
-  app.post("/api/admin/events/:id/hide", (req, res) => {
+  app.post("/api/admin/events/:id/hide", async (req, res) => {
     const eventId = req.params.id;
     const adminEmail = req.body.adminEmail || 'Admin';
     try {
-      const event = db.prepare('SELECT date FROM events WHERE id = ?').get(eventId) as any;
-      if (!event) return res.status(404).json({ error: "Event not found" });
+      const { data: event, error } = await db.from('events').select('date').eq('id', eventId).single();
+      if (error || !event) return res.status(404).json({ error: "Event not found" });
 
       const eventDate = new Date(event.date);
       const now = new Date();
@@ -929,8 +1141,8 @@ async function setupServer() {
         return res.status(400).json({ error: "Event can only be removed after it has ended." });
       }
 
-      db.prepare("UPDATE events SET is_hidden = 1 WHERE id = ?").run(eventId);
-      logAdminAction(adminEmail, 'HIDE_EVENT', `Hid event ${eventId}`, eventId);
+      await db.from('events').update({ is_hidden: true }).eq('id', eventId);
+      await logAdminAction(adminEmail, 'HIDE_EVENT', `Hid event ${eventId}`, eventId);
       res.json({ success: true, message: "Event removed from public page." });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -938,18 +1150,19 @@ async function setupServer() {
   });
 
   // Admin: Regenerate Event Code
-  app.post("/api/admin/events/:id/regenerate-code", (req, res) => {
+  app.post("/api/admin/events/:id/regenerate-code", async (req, res) => {
     const eventId = req.params.id;
     const adminEmail = req.body.adminEmail || 'Admin';
     try {
       let eventCode = generateEventCode();
-      let codeExists = db.prepare('SELECT id FROM events WHERE event_code = ?').get(eventCode);
-      while (codeExists) {
+      let { data: existing } = await db.from('events').select('id').eq('event_code', eventCode).single();
+      while (existing) {
         eventCode = generateEventCode();
-        codeExists = db.prepare('SELECT id FROM events WHERE event_code = ?').get(eventCode);
+        const { data: nextExisting } = await db.from('events').select('id').eq('event_code', eventCode).single();
+        existing = nextExisting;
       }
-      db.prepare("UPDATE events SET event_code = ? WHERE id = ?").run(eventCode, eventId);
-      logAdminAction(adminEmail, 'REGENERATE_EVENT_CODE', `Regenerated code for event ${eventId} to ${eventCode}`, eventId);
+      await db.from('events').update({ event_code: eventCode }).eq('id', eventId);
+      await logAdminAction(adminEmail, 'REGENERATE_EVENT_CODE', `Regenerated code for event ${eventId} to ${eventCode}`, eventId);
       res.json({ success: true, eventCode });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -959,25 +1172,30 @@ async function setupServer() {
   // --- Contract & Organizer APIs ---
 
   // Admin: Get all organizers
-  app.get("/api/admin/organizers", (req, res) => {
+  app.get("/api/admin/organizers", async (req, res) => {
     try {
-      const organizers = db.prepare("SELECT * FROM organizers ORDER BY created_at DESC").all();
-      res.json(organizers);
+      const { data, error } = await db.from('organizers').select('*').order('created_at', { ascending: false });
+      if (error) throw error;
+      res.json(data);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
 
   // Admin: Create organizer
-  app.post("/api/admin/organizers", (req, res) => {
+  app.post("/api/admin/organizers", async (req, res) => {
     const { name, email, company_name, phone, adminEmail } = req.body;
-    const id = 'org_' + uuidv4().substring(0, 8);
+    const id = uuidv4();
     try {
-      db.prepare(`
-        INSERT INTO organizers (id, name, email, company_name, phone)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(id, name, email, company_name || null, phone || null);
-      logAdminAction(adminEmail || 'Admin', 'CREATE_ORGANIZER', `Created organizer ${name} (${email})`);
+      const { error } = await db.from('organizers').insert({
+        id,
+        name,
+        email,
+        company_name: company_name || null,
+        phone: phone || null
+      });
+      if (error) throw error;
+      await logAdminAction(adminEmail || 'Admin', 'CREATE_ORGANIZER', `Created organizer ${name} (${email})`);
       res.json({ success: true, id });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -985,60 +1203,62 @@ async function setupServer() {
   });
 
   // Admin: Get all contracts
-  app.get("/api/admin/contracts", (req, res) => {
+  app.get("/api/admin/contracts", async (req, res) => {
     try {
-      const contracts = db.prepare(`
-        SELECT c.*, o.name as organizer_name, o.email as organizer_email, o.company_name, e.name as event_name
-        FROM contracts c
-        JOIN organizers o ON c.organizer_id = o.id
-        LEFT JOIN events e ON c.event_id = e.id
-        ORDER BY c.created_at DESC
-      `).all();
-      res.json(contracts);
+      const { data, error } = await db
+        .from('contracts')
+        .select('*, organizers(name, email, company_name), events(name)')
+        .order('created_at', { ascending: false });
+      
+      if (error) throw error;
+
+      const processedContracts = data.map((c: any) => ({
+        ...c,
+        organizer_name: c.organizers?.name,
+        organizer_email: c.organizers?.email,
+        company_name: c.organizers?.company_name,
+        event_name: c.events?.name
+      }));
+
+      res.json(processedContracts);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
 
   // Admin: Create contract
-  app.post("/api/admin/contracts", (req, res) => {
+  app.post("/api/admin/contracts", async (req, res) => {
     const { organizer_id, event_id, effective_date, pricing_details, payout_period, adminEmail } = req.body;
-    const id = 'cnt_' + uuidv4().substring(0, 8);
+    const id = uuidv4();
     try {
-      db.prepare(`
-        INSERT INTO contracts (id, organizer_id, event_id, effective_date, pricing_details, payout_period)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(id, organizer_id, event_id || null, effective_date, pricing_details || '6% per ticket + KES 30', payout_period || '3 business days');
-      logAdminAction(adminEmail || 'Admin', 'CREATE_CONTRACT', `Created contract ${id} for organizer ${organizer_id}`);
+      const { error } = await db.from('contracts').insert({
+        id,
+        organizer_id,
+        event_id: event_id || null,
+        effective_date,
+        pricing_details: pricing_details || '6% per ticket + KES 30',
+        payout_period: payout_period || '3 business days'
+      });
+      if (error) throw error;
+      await logAdminAction(adminEmail || 'Admin', 'CREATE_CONTRACT', `Created contract ${id} for organizer ${organizer_id}`);
       res.json({ success: true, id });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
 
-  // Admin: Send contract email
-  app.post("/api/admin/contracts/:id/send", async (req, res) => {
-    const { adminEmail } = req.body;
-    try {
-      await sendContractEmail(req.params.id);
-      logAdminAction(adminEmail || 'Admin', 'SEND_CONTRACT', `Sent contract ${req.params.id} via email`);
-      res.json({ success: true });
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
   // Admin: Update contract status
-  app.put("/api/admin/contracts/:id/status", (req, res) => {
+  app.put("/api/admin/contracts/:id/status", async (req, res) => {
     const { status, adminEmail } = req.body;
     try {
       const signedAt = status === 'SIGNED' ? new Date().toISOString() : null;
-      if (signedAt) {
-        db.prepare("UPDATE contracts SET status = ?, signed_at = ? WHERE id = ?").run(status, signedAt, req.params.id);
-      } else {
-        db.prepare("UPDATE contracts SET status = ? WHERE id = ?").run(status, req.params.id);
-      }
-      logAdminAction(adminEmail || 'Admin', 'UPDATE_CONTRACT_STATUS', `Updated contract ${req.params.id} status to ${status}`);
+      const updateData: any = { status };
+      if (signedAt) updateData.signed_at = signedAt;
+
+      const { error } = await db.from('contracts').update(updateData).eq('id', req.params.id);
+      if (error) throw error;
+
+      await logAdminAction(adminEmail || 'Admin', 'UPDATE_CONTRACT_STATUS', `Updated contract ${req.params.id} status to ${status}`);
       res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -1046,11 +1266,12 @@ async function setupServer() {
   });
 
   // Admin: Delete contract
-  app.delete("/api/admin/contracts/:id", (req, res) => {
+  app.delete("/api/admin/contracts/:id", async (req, res) => {
     const { adminEmail } = req.body;
     try {
-      db.prepare("DELETE FROM contracts WHERE id = ?").run(req.params.id);
-      logAdminAction(adminEmail || 'Admin', 'DELETE_CONTRACT', `Deleted contract ${req.params.id}`);
+      const { error } = await db.from('contracts').delete().eq('id', req.params.id);
+      if (error) throw error;
+      await logAdminAction(adminEmail || 'Admin', 'DELETE_CONTRACT', `Deleted contract ${req.params.id}`);
       res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -1060,55 +1281,73 @@ async function setupServer() {
   // Admin: Download/View Contract PDF
   app.get("/api/admin/contracts/:id/pdf", async (req, res) => {
     try {
-      const contract = db.prepare(`
-        SELECT c.*, o.name as organizer_name, o.email as organizer_email, o.company_name 
-        FROM contracts c
-        JOIN organizers o ON c.organizer_id = o.id
-        WHERE c.id = ?
-      `).get(req.params.id) as any;
+      const { data: contract, error } = await db
+        .from('contracts')
+        .select('*, organizers(name, email, company_name)')
+        .eq('id', req.params.id)
+        .single();
 
-      if (!contract) return res.status(404).json({ error: 'Contract not found' });
+      if (error || !contract) return res.status(404).json({ error: 'Contract not found' });
 
-      const pdfBuffer = await generateContractPDF(contract);
+      const processedContract = {
+        ...contract,
+        organizer_name: contract.organizers?.name,
+        organizer_email: contract.organizers?.email,
+        company_name: contract.organizers?.company_name
+      };
+
+      const pdfBuffer = await generateContractPDF(processedContract);
       res.setHeader('Content-Type', 'application/pdf');
       const dateStr = new Date().toISOString().split('T')[0];
-      res.setHeader('Content-Disposition', `attachment; filename=Contract_${contract.organizer_name.replace(/\s+/g, '_')}_${dateStr}.pdf`);
+      res.setHeader('Content-Disposition', `attachment; filename=Contract_${processedContract.organizer_name.replace(/\s+/g, '_')}_${dateStr}.pdf`);
       res.send(pdfBuffer);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
 
-  // --- Coupon APIs ---
-
   // Admin: Get all coupons
-  app.get("/api/admin/coupons", (req, res) => {
+  app.get("/api/admin/coupons", async (req, res) => {
     try {
-      const coupons = db.prepare(`
-        SELECT c.*, e.name as event_name, tt.name as ticket_type_name
-        FROM coupons c
-        LEFT JOIN events e ON c.event_id = e.id
-        LEFT JOIN ticket_types tt ON c.ticket_type_id = tt.id
-        ORDER BY c.created_at DESC
-      `).all();
-      res.json(coupons);
+      const { data, error } = await db
+        .from('coupons')
+        .select('*, events(name), ticket_types(name)')
+        .order('created_at', { ascending: false });
+      
+      if (error) throw error;
+
+      const processedCoupons = data.map((c: any) => ({
+        ...c,
+        event_name: c.events?.name,
+        ticket_type_name: c.ticket_types?.name
+      }));
+
+      res.json(processedCoupons);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
 
   // Admin: Create coupon
-  app.post("/api/admin/coupons", (req, res) => {
+  app.post("/api/admin/coupons", async (req, res) => {
     const { code, discount_percentage, event_id, ticket_type_id, expiry_date, usage_limit, per_user_limit, adminEmail } = req.body;
-    const id = 'cpn_' + uuidv4().substring(0, 8);
+    const id = uuidv4();
     
     try {
-      db.prepare(`
-        INSERT INTO coupons (id, code, discount_percentage, event_id, ticket_type_id, expiry_date, usage_limit, per_user_limit)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(id, code.toUpperCase(), discount_percentage, event_id || null, ticket_type_id || null, expiry_date || null, usage_limit || null, per_user_limit || null);
+      const { error } = await db.from('coupons').insert({
+        id,
+        code: code.toUpperCase(),
+        discount_percentage,
+        event_id: event_id || null,
+        ticket_type_id: ticket_type_id || null,
+        expiry_date: expiry_date || null,
+        usage_limit: usage_limit || null,
+        per_user_limit: per_user_limit || null
+      });
       
-      logAdminAction(adminEmail || 'Admin', 'CREATE_COUPON', `Created coupon ${code} (${discount_percentage}%)`);
+      if (error) throw error;
+      
+      await logAdminAction(adminEmail || 'Admin', 'CREATE_COUPON', `Created coupon ${code} (${discount_percentage}%)`);
       res.json({ success: true, id });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -1116,11 +1355,12 @@ async function setupServer() {
   });
 
   // Admin: Update coupon (Toggle active status)
-  app.put("/api/admin/coupons/:id", (req, res) => {
+  app.put("/api/admin/coupons/:id", async (req, res) => {
     const { is_active, adminEmail } = req.body;
     try {
-      db.prepare("UPDATE coupons SET is_active = ? WHERE id = ?").run(is_active ? 1 : 0, req.params.id);
-      logAdminAction(adminEmail || 'Admin', 'UPDATE_COUPON', `Updated coupon ${req.params.id} active status to ${is_active}`);
+      const { error } = await db.from('coupons').update({ is_active }).eq('id', req.params.id);
+      if (error) throw error;
+      await logAdminAction(adminEmail || 'Admin', 'UPDATE_COUPON', `Updated coupon ${req.params.id} active status to ${is_active}`);
       res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -1128,12 +1368,13 @@ async function setupServer() {
   });
 
   // Admin: Delete coupon
-  app.delete("/api/admin/coupons/:id", (req, res) => {
+  app.delete("/api/admin/coupons/:id", async (req, res) => {
     const { adminEmail } = req.body;
     try {
-      const coupon = db.prepare("SELECT code FROM coupons WHERE id = ?").get(req.params.id) as any;
-      db.prepare("DELETE FROM coupons WHERE id = ?").run(req.params.id);
-      logAdminAction(adminEmail || 'Admin', 'DELETE_COUPON', `Deleted coupon ${coupon?.code || req.params.id}`);
+      const { data: coupon } = await db.from('coupons').select('code').eq('id', req.params.id).single();
+      const { error } = await db.from('coupons').delete().eq('id', req.params.id);
+      if (error) throw error;
+      await logAdminAction(adminEmail || 'Admin', 'DELETE_COUPON', `Deleted coupon ${coupon?.code || req.params.id}`);
       res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -1141,13 +1382,13 @@ async function setupServer() {
   });
 
   // User: Validate coupon
-  app.post("/api/coupons/validate", (req, res) => {
+  app.post("/api/coupons/validate", async (req, res) => {
     const { code, eventId, ticketTypeId, email } = req.body;
     
     try {
-      const coupon = db.prepare("SELECT * FROM coupons WHERE code = ?").get(code.toUpperCase()) as any;
+      const { data: coupon, error } = await db.from('coupons').select('*').eq('code', code.toUpperCase()).single();
       
-      if (!coupon) {
+      if (error || !coupon) {
         return res.status(404).json({ error: "Invalid coupon code" });
       }
       
@@ -1172,8 +1413,14 @@ async function setupServer() {
       }
       
       if (coupon.per_user_limit && email) {
-        const usageCount = db.prepare("SELECT COUNT(*) as count FROM payments WHERE attendee_email = ? AND coupon_id = ? AND status = 'COMPLETED'").get(email, coupon.id) as any;
-        if (usageCount.count >= coupon.per_user_limit) {
+        const { count } = await db
+          .from('payments')
+          .select('*', { count: 'exact', head: true })
+          .eq('attendee_email', email)
+          .eq('coupon_id', coupon.id)
+          .eq('status', 'COMPLETED');
+        
+        if (count !== null && count >= coupon.per_user_limit) {
           return res.status(400).json({ error: "You have reached the usage limit for this coupon" });
         }
       }
@@ -1189,54 +1436,61 @@ async function setupServer() {
   });
 
   // Create Event
-  app.post("/api/events", (req, res) => {
+  app.post("/api/events", async (req, res) => {
     const { name, organizer, venue, date, time, banner_url, description, category, ticketTypes, adminEmail, is_free, rsvp_limit } = req.body;
-    const eventId = 'evt_' + uuidv4().substring(0, 8);
+    const eventId = uuidv4();
     const finalBannerUrl = convertGoogleDriveUrl(banner_url);
 
     try {
       // Get next event number
-      const lastEvent = db.prepare('SELECT MAX(event_number) as max_num FROM events').get() as any;
-      const nextEventNum = (lastEvent?.max_num || 0) + 1;
+      const { data: lastEvent } = await db.from('events').select('event_number').order('event_number', { ascending: false }).limit(1).single();
+      const nextEventNum = (lastEvent?.event_number || 0) + 1;
 
       // Generate unique event code
       let eventCode = generateEventCode();
-      let codeExists = db.prepare('SELECT id FROM events WHERE event_code = ?').get(eventCode);
-      while (codeExists) {
+      let { data: existing } = await db.from('events').select('id').eq('event_code', eventCode).single();
+      while (existing) {
         eventCode = generateEventCode();
-        codeExists = db.prepare('SELECT id FROM events WHERE event_code = ?').get(eventCode);
+        const { data: nextExisting } = await db.from('events').select('id').eq('event_code', eventCode).single();
+        existing = nextExisting;
       }
 
-      const insertEvent = db.prepare(`
-        INSERT INTO events (id, name, organizer, venue, date, time, banner_url, description, category, event_number, event_code, is_free, rsvp_limit, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      
-      const insertTicketType = db.prepare(`
-        INSERT INTO ticket_types (id, event_id, name, price, quantity, flash_sale_price, flash_sale_start, flash_sale_end)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-
-      const transaction = db.transaction(() => {
-        insertEvent.run(eventId, name, organizer, venue, date, time, finalBannerUrl, description, category || 'Concert', nextEventNum, eventCode, is_free ? 1 : 0, rsvp_limit || null, 'DRAFT');
-        if (!is_free && ticketTypes) {
-          for (const tt of ticketTypes) {
-            insertTicketType.run(
-              uuidv4(), 
-              eventId, 
-              tt.name, 
-              tt.price, 
-              tt.quantity, 
-              tt.flash_sale_price || null, 
-              tt.flash_sale_start && tt.flash_sale_start !== '' ? tt.flash_sale_start : null, 
-              tt.flash_sale_end && tt.flash_sale_end !== '' ? tt.flash_sale_end : null
-            );
-          }
-        }
+      const { error: eventError } = await db.from('events').insert({
+        id: eventId,
+        name,
+        organizer,
+        venue,
+        date,
+        time,
+        banner_url: finalBannerUrl,
+        description,
+        category: category || 'Concert',
+        event_number: nextEventNum,
+        event_code: eventCode,
+        is_free: is_free ? true : false,
+        rsvp_limit: rsvp_limit || null,
+        status: 'DRAFT'
       });
 
-      transaction();
-      logAdminAction(adminEmail || 'Admin', 'CREATE_EVENT', `Created event ${eventId} (${name})`, eventId);
+      if (eventError) throw eventError;
+
+      if (!is_free && ticketTypes) {
+        const ticketTypesToInsert = ticketTypes.map((tt: any) => ({
+          id: uuidv4(),
+          event_id: eventId,
+          name: tt.name,
+          price: tt.price,
+          quantity: tt.quantity,
+          flash_sale_price: tt.flash_sale_price || null,
+          flash_sale_start: tt.flash_sale_start && tt.flash_sale_start !== '' ? tt.flash_sale_start : null,
+          flash_sale_end: tt.flash_sale_end && tt.flash_sale_end !== '' ? tt.flash_sale_end : null
+        }));
+
+        const { error: ttError } = await db.from('ticket_types').insert(ticketTypesToInsert);
+        if (ttError) throw ttError;
+      }
+
+      await logAdminAction(adminEmail || 'Admin', 'CREATE_EVENT', `Created event ${eventId} (${name})`, eventId);
       res.json({ success: true, eventId });
     } catch (error: any) {
       console.error('Error creating event:', error);
@@ -1245,7 +1499,7 @@ async function setupServer() {
   });
 
   // Update Event Status (Publish/Unpublish/Complete)
-  app.post("/api/admin/events/:id/status", (req, res) => {
+  app.post("/api/admin/events/:id/status", async (req, res) => {
     const { id } = req.params;
     const { status, adminEmail } = req.body;
     
@@ -1255,12 +1509,13 @@ async function setupServer() {
         return res.status(400).json({ error: "Invalid status" });
       }
 
-      const is_hidden = status === 'DRAFT' ? 1 : 0;
-      const is_completed = status === 'COMPLETED' ? 1 : 0;
+      const is_hidden = status === 'DRAFT' ? true : false;
+      const is_completed = status === 'COMPLETED' ? true : false;
 
-      db.prepare("UPDATE events SET status = ?, is_hidden = ?, is_completed = ? WHERE id = ?").run(status, is_hidden, is_completed, id);
+      const { error } = await db.from('events').update({ status, is_hidden, is_completed }).eq('id', id);
+      if (error) throw error;
       
-      logAdminAction(adminEmail || 'Admin', 'UPDATE_EVENT_STATUS', `Updated event ${id} status to ${status}`, id);
+      await logAdminAction(adminEmail || 'Admin', 'UPDATE_EVENT_STATUS', `Updated event ${id} status to ${status}`, id);
       res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -1268,19 +1523,28 @@ async function setupServer() {
   });
 
   // Update Event Details
-  app.put("/api/admin/events/:id", (req, res) => {
+  app.put("/api/admin/events/:id", async (req, res) => {
     const { id } = req.params;
     const { name, organizer, venue, date, time, banner_url, description, category, is_free, rsvp_limit, adminEmail } = req.body;
     const finalBannerUrl = convertGoogleDriveUrl(banner_url);
 
     try {
-      db.prepare(`
-        UPDATE events 
-        SET name = ?, organizer = ?, venue = ?, date = ?, time = ?, banner_url = ?, description = ?, category = ?, is_free = ?, rsvp_limit = ?
-        WHERE id = ?
-      `).run(name, organizer, venue, date, time, finalBannerUrl, description, category, is_free ? 1 : 0, rsvp_limit || null, id);
+      const { error } = await db.from('events').update({
+        name,
+        organizer,
+        venue,
+        date,
+        time,
+        banner_url: finalBannerUrl,
+        description,
+        category,
+        is_free: is_free ? true : false,
+        rsvp_limit: rsvp_limit || null
+      }).eq('id', id);
 
-      logAdminAction(adminEmail || 'Admin', 'UPDATE_EVENT', `Updated event ${id} (${name})`, id);
+      if (error) throw error;
+
+      await logAdminAction(adminEmail || 'Admin', 'UPDATE_EVENT', `Updated event ${id} (${name})`, id);
       res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -1288,19 +1552,18 @@ async function setupServer() {
   });
 
   // Reset Data
-  app.post("/api/admin/reset-data", (req, res) => {
+  app.post("/api/admin/reset-data", async (req, res) => {
     try {
-      const transaction = db.transaction(() => {
-        db.prepare("DELETE FROM tickets").run();
-        db.prepare("DELETE FROM payments").run();
-        db.prepare("DELETE FROM scan_logs").run();
-        db.prepare("DELETE FROM coupons").run();
-        db.prepare("DELETE FROM ticket_types").run();
-        db.prepare("DELETE FROM events").run();
-        db.prepare("DELETE FROM contracts").run();
-      });
-      transaction();
-      logAdminAction('Admin', 'RESET_DATA', 'Cleared all event and ticket data');
+      // Order matters for FK constraints
+      await db.from('scan_logs').delete().neq('id', 0);
+      await db.from('tickets').delete().neq('id', '0');
+      await db.from('payments').delete().neq('id', '0');
+      await db.from('coupons').delete().neq('id', '0');
+      await db.from('ticket_types').delete().neq('id', '0');
+      await db.from('contracts').delete().neq('id', '0');
+      await db.from('events').delete().neq('id', '0');
+      
+      await logAdminAction('Admin', 'RESET_DATA', 'Cleared all event and ticket data');
       res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -1308,23 +1571,26 @@ async function setupServer() {
   });
 
   // Export CSV (Simple implementation)
-  app.get("/api/admin/export", (req, res) => {
-    const tickets = db.prepare(`
-      SELECT t.id, t.attendee_name, t.attendee_email, e.name as event_name, tt.name as ticket_type, t.status, t.created_at
-      FROM tickets t
-      JOIN events e ON t.event_id = e.id
-      JOIN ticket_types tt ON t.ticket_type_id = tt.id
-    `).all() as any[];
+  app.get("/api/admin/export", async (req, res) => {
+    try {
+      const { data: tickets, error } = await db
+        .from('tickets')
+        .select('id, attendee_name, attendee_email, status, created_at, events(name), ticket_types(name)');
+      
+      if (error) throw error;
 
-    const headers = ["Ticket ID", "Attendee Name", "Email", "Event", "Type", "Status", "Purchase Date"];
-    const rows = tickets.map(t => [
-      t.id, t.attendee_name, t.attendee_email, t.event_name, t.ticket_type, t.status, t.created_at
-    ]);
+      const headers = ["Ticket ID", "Attendee Name", "Email", "Event", "Type", "Status", "Purchase Date"];
+      const rows = tickets.map((t: any) => [
+        t.id, t.attendee_name, t.attendee_email, t.events?.name, t.ticket_types?.name || 'Free / RSVP', t.status, t.created_at
+      ]);
 
-    const csvContent = [headers, ...rows].map(e => e.join(",")).join("\n");
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', 'attachment; filename=tickets.csv');
-    res.send(csvContent);
+      const csvContent = [headers, ...rows].map(e => e.join(",")).join("\n");
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename=tickets_export.csv');
+      res.send(csvContent);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
   });
 
   // --- Vite Middleware ---
