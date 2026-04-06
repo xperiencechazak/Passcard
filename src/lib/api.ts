@@ -10,7 +10,7 @@ export const fetchApi = async (endpoint: string, options: RequestInit = {}) => {
   
   const headers = {
     'Content-Type': 'application/json',
-    ...(token ? { 'Authorization': token } : {}),
+    ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
     ...options.headers,
   };
 

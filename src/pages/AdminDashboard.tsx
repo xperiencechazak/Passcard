@@ -40,6 +40,7 @@ import {
 import { cn, convertGoogleDriveUrl } from '../lib/utils';
 import { fetchApi } from '../lib/api';
 import TicketVerification from './TicketVerification';
+import { supabase } from '../lib/supabase';
 
 const AddEventForm = ({ onSuccess }: { onSuccess: () => void }) => {
   const [formData, setFormData] = useState({
@@ -1203,6 +1204,7 @@ const AdminDashboard = () => {
     return () => window.removeEventListener('admin-logout', handleLogout);
   }, []);
   const [prefilledTicketId, setPrefilledTicketId] = useState<string | undefined>(undefined);
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [activeTab, setActiveTab] = useState<'stats' | 'events' | 'tickets' | 'scan' | 'add-event' | 'inventory' | 'scan-history' | 'coupons' | 'contracts' | 'rsvps' | 'submissions'>('stats');
@@ -1234,22 +1236,24 @@ const AdminDashboard = () => {
     setIsLoggingIn(true);
     
     try {
-      const data = await fetchApi('/api/admin/login', {
-        method: 'POST',
-        body: JSON.stringify({ password })
+      const { data: authData, error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
       });
+
+      if (error) throw error;
       
-      if (data.success) {
+      if (authData.session) {
         setIsLoggedIn(true);
-        localStorage.setItem('admin_token', data.token);
+        localStorage.setItem('admin_token', authData.session.access_token);
         if (rememberMe) {
           localStorage.setItem('admin_logged_in', 'true');
         }
         fetchData();
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      alert('Invalid credentials or connection error');
+      alert(err.message || 'Invalid credentials or connection error');
     } finally {
       setIsLoggingIn(false);
     }
@@ -1516,6 +1520,18 @@ const AdminDashboard = () => {
           
           <form onSubmit={handleLogin} className="space-y-6">
             <div className="space-y-2">
+              <label className="text-xs font-bold text-white/40 uppercase tracking-[0.2em] ml-1">Email Address</label>
+              <input 
+                type="email" 
+                required
+                className="w-full p-5 bg-primary/40 border border-white/10 rounded-2xl focus:ring-2 focus:ring-secondary transition-all text-white placeholder:text-white/20 text-lg"
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+                placeholder="admin@example.com"
+              />
+            </div>
+
+            <div className="space-y-2">
               <label className="text-xs font-bold text-white/40 uppercase tracking-[0.2em] ml-1">Access Password</label>
               <div className="relative">
                 <input 
@@ -1632,9 +1648,11 @@ const AdminDashboard = () => {
         </nav>
 
         <button 
-          onClick={() => {
+          onClick={async () => {
+            await supabase.auth.signOut();
             setIsLoggedIn(false);
             localStorage.removeItem('admin_logged_in');
+            localStorage.removeItem('admin_token');
             navigate('/');
           }}
           className="mt-8 flex items-center space-x-4 p-4 text-white/40 hover:text-red-400 transition-colors font-bold"
@@ -1669,9 +1687,11 @@ const AdminDashboard = () => {
             </h1>
             <div className="flex items-center space-x-3 w-full md:w-auto overflow-x-auto pb-2 md:pb-0 no-scrollbar">
               <button 
-                onClick={() => {
+                onClick={async () => {
+                  await supabase.auth.signOut();
                   setIsLoggedIn(false);
                   localStorage.removeItem('admin_logged_in');
+                  localStorage.removeItem('admin_token');
                   navigate('/');
                 }}
                 className="bg-red-500/10 text-red-400 p-3 rounded-2xl hover:bg-red-500/20 transition-all border border-red-500/10 flex items-center space-x-2"
@@ -2985,9 +3005,11 @@ const AdminDashboard = () => {
                   ))}
                   <div className="h-px bg-white/5 my-2" />
                   <button
-                    onClick={() => {
+                    onClick={async () => {
+                      await supabase.auth.signOut();
                       setIsLoggedIn(false);
                       localStorage.removeItem('admin_logged_in');
+                      localStorage.removeItem('admin_token');
                       navigate('/');
                     }}
                     className="w-full flex items-center space-x-3 p-4 rounded-xl text-red-400 hover:bg-red-400/10 transition-all text-left"

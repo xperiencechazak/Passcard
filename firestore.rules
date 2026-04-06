@@ -1,0 +1,110 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: events
+    // Fields: id, name, organizer, venue, date, time, banner_url, description, category, is_hidden, event_number, event_code, is_free, rsvp_limit, is_completed, status, organizer_email, created_at
+    //
+    // Collection: payments
+    // Fields: id, checkout_request_id, merchant_request_id, mpesa_receipt_number, phone, amount, quantity, status, event_id, ticket_type_id, attendee_name, attendee_email, created_at, coupon_id, discount_amount
+    //
+    // Collection: tickets
+    // Fields: id, payment_id, event_id, ticket_type_id, attendee_name, attendee_email, status, scan_time, email_status, email_sent_at, created_at, deleted_at, ticket_sequence_number
+    //
+    // Collection: scan_logs
+    // Fields: ticket_id, status, message, scanned_at
+    //
+    // Collection: admin_logs
+    // Fields: admin_email, action, details, event_id, created_at
+    //
+    // Collection: coupons
+    // Fields: id, code, discount_percentage, event_id, ticket_type_id, expiry_date, usage_limit, used_count, per_user_limit, is_active, created_at
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && 
+        (request.auth.token.email == "xperiencechazak@gmail.com" && request.auth.token.email_verified == true);
+    }
+
+    function isValidEvent(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() < 200 &&
+             data.organizer is string && data.organizer.size() > 0 &&
+             data.venue is string && data.venue.size() > 0 &&
+             data.date is string &&
+             data.time is string;
+    }
+
+    function isValidPayment(data) {
+      return data.phone is string &&
+             data.amount is number && data.amount >= 0 &&
+             data.event_id is string &&
+             data.ticket_type_id is string &&
+             data.attendee_name is string &&
+             data.attendee_email is string;
+    }
+
+    function isValidTicket(data) {
+      return data.payment_id is string &&
+             data.event_id is string &&
+             data.ticket_type_id is string &&
+             data.attendee_name is string &&
+             data.attendee_email is string;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /events/{eventId} {
+      allow read: if true; // Public can see events
+      allow create, update, delete: if isAdmin() && isValidEvent(request.resource.data);
+      
+      match /ticket_types/{ticketTypeId} {
+        allow read: if true;
+        allow create, update, delete: if isAdmin();
+      }
+    }
+
+    match /payments/{paymentId} {
+      allow read: if isAdmin();
+      allow create: if true; // Anyone can initiate a payment
+      allow update: if isAdmin();
+    }
+
+    match /tickets/{ticketId} {
+      allow read: if true; // Needed for users to see their tickets by ID or email (query)
+      allow create: if true; // Created after payment success (usually by backend or client if trusted)
+      allow update: if isAdmin() || (isAuthenticated() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'scan_time']) && isAdmin());
+    }
+
+    match /scan_logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin();
+    }
+
+    match /admin_logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin();
+    }
+
+    match /coupons/{couponId} {
+      allow read: if true; // Needed to validate coupons on checkout
+      allow create, update, delete: if isAdmin();
+    }
+    
+    match /users/{userId} {
+      allow read, write: if isAuthenticated() && request.auth.uid == userId;
+    }
+  }
+}

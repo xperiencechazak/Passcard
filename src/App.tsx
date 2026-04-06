@@ -9,7 +9,6 @@ import PrivacyPolicyPage from './pages/PrivacyPolicyPage';
 import TermsConditionsPage from './pages/TermsConditionsPage';
 import AdminDashboard from './pages/AdminDashboard';
 import TicketVerification from './pages/TicketVerification';
-
 function App() {
   return (
     <Router>
@@ -17,10 +16,13 @@ function App() {
         {/* Public Routes */}
         <Route element={<PublicLayout />}>
           <Route path="/" element={<HomePage />} />
+          <Route path="/events" element={<HomePage />} />
           <Route path="/event/:id" element={<EventDetailPage />} />
           <Route path="/host" element={<HostEventPage />} />
           <Route path="/privacy" element={<PrivacyPolicyPage />} />
           <Route path="/terms" element={<TermsConditionsPage />} />
+          {/* Catch-all for unknown public routes */}
+          <Route path="*" element={<HomePage />} />
         </Route>
 
         {/* Admin Routes */}

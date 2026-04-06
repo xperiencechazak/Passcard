@@ -1,32 +1,29 @@
-import { type ClassValue, clsx } from "clsx";
-import { twMerge } from "tailwind-merge";
+import { clsx, type ClassValue } from 'clsx';
+import { twMerge } from 'tailwind-merge';
 
+/**
+ * Combines Tailwind classes with clsx and tailwind-merge.
+ */
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+/**
+ * Converts a Google Drive share link to a direct download link.
+ */
 export function convertGoogleDriveUrl(url: string): string {
   if (!url) return url;
-  
-  // Handle Google Drive links
   if (url.includes('drive.google.com')) {
     let fileId = '';
-    const fileDMatch = url.match(/\/file\/d\/([^\/?]+)/);
-    if (fileDMatch) {
-      fileId = fileDMatch[1];
-    } else {
-      const idMatch = url.match(/[?&]id=([^&?]+)/);
-      if (idMatch) {
-        fileId = idMatch[1];
-      }
-    }
+    const matchId = url.match(/\/d\/([a-zA-Z0-9_-]+)/);
+    const matchQuery = url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+    
+    if (matchId) fileId = matchId[1];
+    else if (matchQuery) fileId = matchQuery[1];
     
     if (fileId) {
-      // Use the googleusercontent.com format which is often more reliable for direct embedding
-      return `https://lh3.googleusercontent.com/d/${fileId}`;
+      return `https://drive.google.com/uc?export=view&id=${fileId}`;
     }
   }
-  
-  // Handle other common cloud storage if needed, or just return as is
   return url;
 }

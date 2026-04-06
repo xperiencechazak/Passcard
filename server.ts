@@ -11,6 +11,11 @@ import multer from "multer";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
+import { createClient } from "@supabase/supabase-js";
+
+const supabaseUrl = process.env.VITE_SUPABASE_URL || "";
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
 function convertGoogleDriveUrl(url: string): string {
   if (!url) return url;
@@ -110,31 +115,40 @@ app.use(bodyParser.json());
 app.use('/uploads', express.static(uploadsDir));
 
 // Admin Auth Middleware
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'admin-secret-token';
-
-const adminAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+const adminAuth = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (req.path === '/login') return next();
-  const token = req.headers['authorization'];
-  if (token === ADMIN_TOKEN) {
+  
+  const authHeader = req.headers['authorization'];
+  if (!authHeader) {
+    return res.status(401).json({ error: 'No authorization header' });
+  }
+
+  const token = authHeader.replace('Bearer ', '');
+  
+  try {
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+    
+    if (error || !user) {
+      // Fallback for old token during transition if needed, 
+      // but ideally we just use Supabase now.
+      const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'admin-secret-token';
+      if (token === ADMIN_TOKEN) {
+        return next();
+      }
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+
+    // You can add additional checks here, e.g., check if user is in an 'admins' table
+    // For now, we'll assume any authenticated user with this token is an admin
+    // if they are logging into the admin dashboard.
+    (req as any).user = user;
     next();
-  } else {
-    res.status(403).json({ error: 'Forbidden' });
+  } catch (err) {
+    res.status(500).json({ error: 'Authentication error' });
   }
 };
 
 app.use('/api/admin', adminAuth);
-
-// Admin Login Endpoint
-app.post("/api/admin/login", (req, res) => {
-  const { password } = req.body;
-  const ADMIN_PASS = process.env.ADMIN_PASSWORD || 'Stefanie26';
-  
-  if (password === ADMIN_PASS) {
-    res.json({ success: true, token: ADMIN_TOKEN });
-  } else {
-    res.status(401).json({ error: 'Invalid credentials' });
-  }
-});
 
 async function setupServer() {
   // --- Migrations ---

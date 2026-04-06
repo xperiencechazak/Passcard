@@ -5,22 +5,7 @@ import axios from 'axios';
 import * as ics from 'ics';
 import db from './db';
 
-function convertGoogleDriveUrl(url: string): string {
-  if (!url) return url;
-  if (url.includes('drive.google.com')) {
-    let fileId = '';
-    const matchId = url.match(/\/d\/([a-zA-Z0-9_-]+)/);
-    const matchQuery = url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
-    
-    if (matchId) fileId = matchId[1];
-    else if (matchQuery) fileId = matchQuery[1];
-    
-    if (fileId) {
-      return `https://drive.google.com/uc?export=view&id=${fileId}`;
-    }
-  }
-  return url;
-}
+import { convertGoogleDriveUrl } from '../lib/utils';
 
 const transporter = nodemailer.createTransport({
   host: process.env.EMAIL_HOST,
