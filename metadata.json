@@ -1,0 +1,5 @@
+{
+  "name": "PassCard KE",
+  "description": "Access the Xtraordinary. The ultimate ticketing platform for seamless event experiences.",
+  "requestFramePermissions": ["camera"]
+}

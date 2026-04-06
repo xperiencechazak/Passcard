@@ -1,0 +1,97 @@
+{
+  "entities": {
+    "Event": {
+      "title": "Event",
+      "description": "An event created by an organizer",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "organizer": { "type": "string" },
+        "venue": { "type": "string" },
+        "date": { "type": "string" },
+        "time": { "type": "string" },
+        "banner_url": { "type": "string" },
+        "description": { "type": "string" },
+        "category": { "type": "string" },
+        "is_hidden": { "type": "boolean" },
+        "event_number": { "type": "integer" },
+        "event_code": { "type": "string" },
+        "is_free": { "type": "boolean" },
+        "rsvp_limit": { "type": "integer" },
+        "is_completed": { "type": "boolean" },
+        "status": { "type": "string" },
+        "organizer_email": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "organizer", "venue", "date", "time"]
+    },
+    "TicketType": {
+      "title": "TicketType",
+      "description": "A type of ticket for an event",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "event_id": { "type": "string" },
+        "name": { "type": "string" },
+        "price": { "type": "integer" },
+        "quantity": { "type": "integer" },
+        "sold": { "type": "integer" },
+        "flash_sale_price": { "type": "integer" },
+        "flash_sale_start": { "type": "string", "format": "date-time" },
+        "flash_sale_end": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "event_id", "name", "price", "quantity"]
+    },
+    "Ticket": {
+      "title": "Ticket",
+      "description": "A ticket purchased by an attendee",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "payment_id": { "type": "string" },
+        "event_id": { "type": "string" },
+        "ticket_type_id": { "type": "string" },
+        "attendee_name": { "type": "string" },
+        "attendee_email": { "type": "string" },
+        "status": { "type": "string" },
+        "scan_time": { "type": "string", "format": "date-time" },
+        "email_status": { "type": "string" },
+        "email_sent_at": { "type": "string", "format": "date-time" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "ticket_sequence_number": { "type": "integer" }
+      },
+      "required": ["id", "payment_id", "event_id", "ticket_type_id", "attendee_name", "attendee_email"]
+    },
+    "User": {
+      "title": "User",
+      "description": "A user of the application",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "user"] }
+      },
+      "required": ["uid", "email"]
+    }
+  },
+  "firestore": {
+    "/events/{eventId}": {
+      "schema": "Event",
+      "description": "Collection of events"
+    },
+    "/events/{eventId}/ticketTypes/{ticketTypeId}": {
+      "schema": "TicketType",
+      "description": "Ticket types for a specific event"
+    },
+    "/tickets/{ticketId}": {
+      "schema": "Ticket",
+      "description": "Collection of tickets"
+    },
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    }
+  }
+}

@@ -1,0 +1,91 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Space Grotesk", sans-serif;
+  
+  --color-primary: #0A0A0A; /* Charcoal Black */
+  --color-secondary: #FF8C00; /* Vibrant Safety Orange */
+  --color-accent: #FF8C00; /* Vibrant Safety Orange */
+  --color-surface: #1A1A1A; /* Lighter Charcoal for surfaces */
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+  body {
+    @apply text-white antialiased bg-primary;
+    /* Safe area insets for mobile devices */
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+}
+
+@layer utilities {
+  /* Orientation-aware layout helpers */
+  @media (orientation: landscape) and (max-width: 1024px) {
+    .landscape-grid {
+      @apply grid-cols-2;
+    }
+  }
+  
+  .touch-target {
+    @apply min-h-[48px] min-w-[48px] flex items-center justify-center;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  
+  @keyframes gradient-x {
+    0%, 100% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+  }
+  .animate-gradient-x {
+    background-size: 200% 200%;
+    animation: gradient-x 5s ease infinite;
+  }
+}
+
+/* QR Scanner Stability Fixes */
+#reader video {
+  object-fit: cover !important;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+#reader {
+  border: none !important;
+}
+
+#reader__scan_region {
+  background: transparent !important;
+}
+
+#reader__dashboard {
+  display: none !important;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0A0A0A;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #FF8C00;
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #FFFFFF;
+}
