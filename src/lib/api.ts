@@ -3,26 +3,14 @@
  * headers, and error handling.
  */
 
-import { auth } from '../firebase';
-
 const API_BASE = import.meta.env.VITE_API_URL || '';
 
 export const fetchApi = async (endpoint: string, options: RequestInit = {}) => {
-  let token = localStorage.getItem('admin_token');
-  
-  // Try to get fresh token from Firebase if available
-  if (auth.currentUser) {
-    try {
-      token = await auth.currentUser.getIdToken(true);
-      localStorage.setItem('admin_token', token);
-    } catch (e) {
-      console.error('Error getting Firebase token:', e);
-    }
-  }
+  const token = localStorage.getItem('admin_token');
   
   const headers = {
     'Content-Type': 'application/json',
-    ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+    ...(token ? { 'Authorization': token } : {}),
     ...options.headers,
   };
 

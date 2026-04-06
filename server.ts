@@ -11,18 +11,6 @@ import multer from "multer";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
-import admin from "firebase-admin";
-import firebaseConfig from "./firebase-applet-config.json";
-
-// Initialize Firebase Admin
-if (!admin.apps.length) {
-  console.log('Initializing Firebase Admin with Project ID:', firebaseConfig.projectId);
-  admin.initializeApp({
-    projectId: firebaseConfig.projectId,
-  });
-} else {
-  console.log('Firebase Admin already initialized');
-}
 
 function convertGoogleDriveUrl(url: string): string {
   if (!url) return url;
@@ -122,57 +110,29 @@ app.use(bodyParser.json());
 app.use('/uploads', express.static(uploadsDir));
 
 // Admin Auth Middleware
-const ADMIN_EMAILS = [
-  'xperiencechazak@gmail.com',
-  process.env.ADMIN_EMAIL
-].filter(Boolean) as string[];
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'admin-secret-token';
 
-const adminAuth = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
-  const authHeader = req.headers['authorization'];
-  console.log('Admin Auth Header:', authHeader ? 'Present' : 'Missing');
-  
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Unauthorized: No token provided' });
-  }
-
-  const token = authHeader.split('Bearer ')[1];
-  
-  try {
-    const decodedToken = await admin.auth().verifyIdToken(token);
-    console.log('Decoded Token Email:', decodedToken.email);
-    if (ADMIN_EMAILS.includes(decodedToken.email || '')) {
-      (req as any).user = decodedToken;
-      next();
-    } else {
-      console.warn(`Unauthorized access attempt by: ${decodedToken.email}`);
-      res.status(403).json({ error: 'Forbidden: You do not have admin access' });
-    }
-  } catch (error) {
-    console.error('Firebase Auth Error:', error);
-    res.status(401).json({ error: 'Unauthorized: Invalid token' });
+const adminAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (req.path === '/login') return next();
+  const token = req.headers['authorization'];
+  if (token === ADMIN_TOKEN) {
+    next();
+  } else {
+    res.status(403).json({ error: 'Forbidden' });
   }
 };
 
 app.use('/api/admin', adminAuth);
 
-// Admin Login Endpoint (Now just a verification endpoint for Firebase tokens)
-app.post("/api/admin/login", async (req, res) => {
-  const authHeader = req.headers['authorization'];
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
-  const token = authHeader.split('Bearer ')[1];
+// Admin Login Endpoint
+app.post("/api/admin/login", (req, res) => {
+  const { password } = req.body;
+  const ADMIN_PASS = process.env.ADMIN_PASSWORD || 'Stefanie26';
   
-  try {
-    const decodedToken = await admin.auth().verifyIdToken(token);
-    if (ADMIN_EMAILS.includes(decodedToken.email || '')) {
-      res.json({ success: true, user: decodedToken });
-    } else {
-      res.status(403).json({ error: 'Forbidden: Not an admin' });
-    }
-  } catch (error) {
-    res.status(401).json({ error: 'Invalid token' });
+  if (password === ADMIN_PASS) {
+    res.json({ success: true, token: ADMIN_TOKEN });
+  } else {
+    res.status(401).json({ error: 'Invalid credentials' });
   }
 });
 
@@ -265,8 +225,8 @@ async function setupServer() {
     }
   });
 
-  // Admin: File Upload Endpoint
-  app.post("/api/admin/upload", upload.single('image'), (req, res) => {
+  // File Upload Endpoint
+  app.post("/api/upload", upload.single('image'), (req, res) => {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
     }
@@ -526,64 +486,8 @@ async function setupServer() {
     res.json({ ResultCode: 0, ResultDesc: "Success" });
   });
 
-  // Admin: Create Event
-  app.post("/api/admin/events", (req, res) => {
-    const { name, organizer, venue, date, time, banner_url, description, category, ticketTypes, adminEmail, is_free, rsvp_limit } = req.body;
-    const eventId = 'evt_' + uuidv4().substring(0, 8);
-    const finalBannerUrl = convertGoogleDriveUrl(banner_url);
-
-    try {
-      // Get next event number
-      const lastEvent = db.prepare('SELECT MAX(event_number) as max_num FROM events').get() as any;
-      const nextEventNum = (lastEvent?.max_num || 0) + 1;
-
-      // Generate unique event code
-      let eventCode = generateEventCode();
-      let codeExists = db.prepare('SELECT id FROM events WHERE event_code = ?').get(eventCode);
-      while (codeExists) {
-        eventCode = generateEventCode();
-        codeExists = db.prepare('SELECT id FROM events WHERE event_code = ?').get(eventCode);
-      }
-
-      const insertEvent = db.prepare(`
-        INSERT INTO events (id, name, organizer, venue, date, time, banner_url, description, category, event_number, event_code, is_free, rsvp_limit, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      
-      const insertTicketType = db.prepare(`
-        INSERT INTO ticket_types (id, event_id, name, price, quantity, flash_sale_price, flash_sale_start, flash_sale_end)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-
-      const transaction = db.transaction(() => {
-        insertEvent.run(eventId, name, organizer, venue, date, time, finalBannerUrl, description, category || 'Concert', nextEventNum, eventCode, is_free ? 1 : 0, rsvp_limit || null, 'DRAFT');
-        if (!is_free && ticketTypes) {
-          for (const tt of ticketTypes) {
-            insertTicketType.run(
-              uuidv4(), 
-              eventId, 
-              tt.name, 
-              tt.price, 
-              tt.quantity, 
-              tt.flash_sale_price || null, 
-              tt.flash_sale_start && tt.flash_sale_start !== '' ? tt.flash_sale_start : null, 
-              tt.flash_sale_end && tt.flash_sale_end !== '' ? tt.flash_sale_end : null
-            );
-          }
-        }
-      });
-
-      transaction();
-      logAdminAction(adminEmail || 'Admin', 'CREATE_EVENT', `Created event ${eventId} (${name})`, eventId);
-      res.json({ success: true, eventId });
-    } catch (error: any) {
-      console.error('Error creating event:', error);
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // Admin: Verify Ticket
-  app.post("/api/admin/verify", (req, res) => {
+  // Verify Ticket
+  app.post("/api/verify", (req, res) => {
     const { ticketId } = req.body;
     const normalizedTicketId = ticketId?.trim()?.toUpperCase();
     
@@ -1270,7 +1174,63 @@ async function setupServer() {
     }
   });
 
-  // Admin: Update Event Status (Publish/Unpublish/Complete)
+  // Create Event
+  app.post("/api/events", (req, res) => {
+    const { name, organizer, venue, date, time, banner_url, description, category, ticketTypes, adminEmail, is_free, rsvp_limit } = req.body;
+    const eventId = 'evt_' + uuidv4().substring(0, 8);
+    const finalBannerUrl = convertGoogleDriveUrl(banner_url);
+
+    try {
+      // Get next event number
+      const lastEvent = db.prepare('SELECT MAX(event_number) as max_num FROM events').get() as any;
+      const nextEventNum = (lastEvent?.max_num || 0) + 1;
+
+      // Generate unique event code
+      let eventCode = generateEventCode();
+      let codeExists = db.prepare('SELECT id FROM events WHERE event_code = ?').get(eventCode);
+      while (codeExists) {
+        eventCode = generateEventCode();
+        codeExists = db.prepare('SELECT id FROM events WHERE event_code = ?').get(eventCode);
+      }
+
+      const insertEvent = db.prepare(`
+        INSERT INTO events (id, name, organizer, venue, date, time, banner_url, description, category, event_number, event_code, is_free, rsvp_limit, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      
+      const insertTicketType = db.prepare(`
+        INSERT INTO ticket_types (id, event_id, name, price, quantity, flash_sale_price, flash_sale_start, flash_sale_end)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      const transaction = db.transaction(() => {
+        insertEvent.run(eventId, name, organizer, venue, date, time, finalBannerUrl, description, category || 'Concert', nextEventNum, eventCode, is_free ? 1 : 0, rsvp_limit || null, 'DRAFT');
+        if (!is_free && ticketTypes) {
+          for (const tt of ticketTypes) {
+            insertTicketType.run(
+              uuidv4(), 
+              eventId, 
+              tt.name, 
+              tt.price, 
+              tt.quantity, 
+              tt.flash_sale_price || null, 
+              tt.flash_sale_start && tt.flash_sale_start !== '' ? tt.flash_sale_start : null, 
+              tt.flash_sale_end && tt.flash_sale_end !== '' ? tt.flash_sale_end : null
+            );
+          }
+        }
+      });
+
+      transaction();
+      logAdminAction(adminEmail || 'Admin', 'CREATE_EVENT', `Created event ${eventId} (${name})`, eventId);
+      res.json({ success: true, eventId });
+    } catch (error: any) {
+      console.error('Error creating event:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Update Event Status (Publish/Unpublish/Complete)
   app.post("/api/admin/events/:id/status", (req, res) => {
     const { id } = req.params;
     const { status, adminEmail } = req.body;
@@ -1293,7 +1253,7 @@ async function setupServer() {
     }
   });
 
-  // Admin: Update Event Details
+  // Update Event Details
   app.put("/api/admin/events/:id", (req, res) => {
     const { id } = req.params;
     const { name, organizer, venue, date, time, banner_url, description, category, is_free, rsvp_limit, adminEmail } = req.body;
@@ -1313,7 +1273,7 @@ async function setupServer() {
     }
   });
 
-  // Admin: Reset Data
+  // Reset Data
   app.post("/api/admin/reset-data", (req, res) => {
     try {
       const transaction = db.transaction(() => {
@@ -1333,7 +1293,7 @@ async function setupServer() {
     }
   });
 
-  // Admin: Export CSV (Simple implementation)
+  // Export CSV (Simple implementation)
   app.get("/api/admin/export", (req, res) => {
     const tickets = db.prepare(`
       SELECT t.id, t.attendee_name, t.attendee_email, e.name as event_name, tt.name as ticket_type, t.status, t.created_at

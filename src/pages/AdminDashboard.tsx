@@ -40,8 +40,6 @@ import {
 import { cn, convertGoogleDriveUrl } from '../lib/utils';
 import { fetchApi } from '../lib/api';
 import TicketVerification from './TicketVerification';
-import { auth, signInWithGoogle, logout } from '../firebase';
-import { onAuthStateChanged } from 'firebase/auth';
 
 const AddEventForm = ({ onSuccess }: { onSuccess: () => void }) => {
   const [formData, setFormData] = useState({
@@ -79,7 +77,7 @@ const AddEventForm = ({ onSuccess }: { onSuccess: () => void }) => {
 
     setIsSubmitting(true);
     try {
-      await fetchApi('/api/admin/events', {
+      await fetchApi('/api/events', {
         method: 'POST',
         body: JSON.stringify(formData)
       });
@@ -377,7 +375,7 @@ const CreateEventModal = ({ isOpen, onClose, onSuccess }: { isOpen: boolean, onC
 
     setIsSubmitting(true);
     try {
-      await fetchApi('/api/admin/events', {
+      await fetchApi('/api/events', {
         method: 'POST',
         body: JSON.stringify(formData)
       });
@@ -1195,65 +1193,18 @@ const CompleteSetupModal = ({ isOpen, onClose, onSuccess, submission }: { isOpen
 
 const AdminDashboard = () => {
   const navigate = useNavigate();
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [isAuthChecking, setIsAuthChecking] = useState(true);
-  const [user, setUser] = useState<any>(null);
+  const [isLoggedIn, setIsLoggedIn] = useState(() => {
+    return localStorage.getItem('admin_logged_in') === 'true' && !!localStorage.getItem('admin_token');
+  });
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser) {
-        try {
-          const token = await firebaseUser.getIdToken();
-          localStorage.setItem('admin_token', token);
-          
-          // Verify with backend that this user is an admin
-          const data = await fetchApi('/api/admin/login', {
-            method: 'POST'
-          });
-          
-          if (data.success) {
-            setIsLoggedIn(true);
-            setUser(firebaseUser);
-            localStorage.setItem('admin_logged_in', 'true');
-          } else {
-            setIsLoggedIn(false);
-            setUser(null);
-            localStorage.removeItem('admin_token');
-            localStorage.removeItem('admin_logged_in');
-            await logout();
-          }
-        } catch (err) {
-          console.error('Auth verification failed:', err);
-          setIsLoggedIn(false);
-          setUser(null);
-        }
-      } else {
-        setIsLoggedIn(false);
-        setUser(null);
-        localStorage.removeItem('admin_token');
-        localStorage.removeItem('admin_logged_in');
-      }
-      setIsAuthChecking(false);
-    });
-
-    return () => unsubscribe();
-  }, []);
-
-  const handleLogout = async () => {
-    try {
-      await logout();
-      setIsLoggedIn(false);
-      setUser(null);
-    } catch (err) {
-      console.error(err);
-    }
-  };
-
-  useEffect(() => {
+    const handleLogout = () => setIsLoggedIn(false);
     window.addEventListener('admin-logout', handleLogout);
     return () => window.removeEventListener('admin-logout', handleLogout);
   }, []);
   const [prefilledTicketId, setPrefilledTicketId] = useState<string | undefined>(undefined);
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [activeTab, setActiveTab] = useState<'stats' | 'events' | 'tickets' | 'scan' | 'add-event' | 'inventory' | 'scan-history' | 'coupons' | 'contracts' | 'rsvps' | 'submissions'>('stats');
   const [editingEvent, setEditingEvent] = useState<any>(null);
   const [selectedSubmission, setSelectedSubmission] = useState<any>(null);
@@ -1275,15 +1226,30 @@ const AdminDashboard = () => {
   const [isContractModalOpen, setIsContractModalOpen] = useState(false);
   const [isCompleteSetupModalOpen, setIsCompleteSetupModalOpen] = useState(false);
   const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(false);
+  const [rememberMe, setRememberMe] = useState(true);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
-  const handleLogin = async () => {
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
     setIsLoggingIn(true);
+    
     try {
-      await signInWithGoogle();
+      const data = await fetchApi('/api/admin/login', {
+        method: 'POST',
+        body: JSON.stringify({ password })
+      });
+      
+      if (data.success) {
+        setIsLoggedIn(true);
+        localStorage.setItem('admin_token', data.token);
+        if (rememberMe) {
+          localStorage.setItem('admin_logged_in', 'true');
+        }
+        fetchData();
+      }
     } catch (err) {
       console.error(err);
-      alert('Login failed. Please try again.');
+      alert('Invalid credentials or connection error');
     } finally {
       setIsLoggingIn(false);
     }
@@ -1479,7 +1445,7 @@ const AdminDashboard = () => {
 
   const handleQuickCheckIn = async (ticketId: string) => {
     try {
-      const data = await fetchApi('/api/admin/verify', {
+      const data = await fetchApi('/api/verify', {
         method: 'POST',
         body: JSON.stringify({ ticketId })
       });
@@ -1532,14 +1498,6 @@ const AdminDashboard = () => {
     }
   };
 
-  if (isAuthChecking) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-primary">
-        <RefreshCw className="animate-spin text-secondary" size={48} />
-      </div>
-    );
-  }
-
   if (!isLoggedIn) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-primary p-6 md:p-4">
@@ -1552,24 +1510,63 @@ const AdminDashboard = () => {
             <div className="w-20 h-20 bg-primary rounded-3xl flex items-center justify-center mx-auto mb-6 text-secondary border border-white/10 shadow-xl shadow-secondary/5">
               <Sparkles size={40} />
             </div>
-            <h1 className="text-3xl font-bold text-white tracking-tight">Admin Portal</h1>
-            <p className="text-white/50 mt-2">Sign in to manage your events</p>
+            <h1 className="text-3xl font-bold text-white tracking-tight">Welcome Back</h1>
+            <p className="text-white/50 mt-2">Manage your Xtraordinary events</p>
           </div>
           
-          <div className="space-y-6">
+          <form onSubmit={handleLogin} className="space-y-6">
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-white/40 uppercase tracking-[0.2em] ml-1">Access Password</label>
+              <div className="relative">
+                <input 
+                  type={showPassword ? "text" : "password"} 
+                  required
+                  className="w-full p-5 bg-primary/40 border border-white/10 rounded-2xl focus:ring-2 focus:ring-secondary transition-all text-white pr-14 placeholder:text-white/20 text-lg"
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-5 top-1/2 -translate-y-1/2 text-white/30 hover:text-secondary transition-colors touch-target"
+                >
+                  {showPassword ? <EyeOff size={22} /> : <Eye size={22} />}
+                </button>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between px-1">
+              <label className="flex items-center space-x-3 cursor-pointer group">
+                <div className="relative flex items-center">
+                  <input 
+                    type="checkbox" 
+                    className="peer sr-only"
+                    checked={rememberMe}
+                    onChange={() => setRememberMe(!rememberMe)}
+                  />
+                  <div className="w-6 h-6 bg-primary/40 border border-white/10 rounded-lg peer-checked:bg-secondary peer-checked:border-secondary transition-all" />
+                  <CheckCircle2 className="absolute inset-0 m-auto w-4 h-4 text-primary opacity-0 peer-checked:opacity-100 transition-opacity" />
+                </div>
+                <span className="text-sm font-bold text-white/60 group-hover:text-white transition-colors">Remember Me</span>
+              </label>
+              <button type="button" className="text-sm font-bold text-secondary hover:underline">Forgot?</button>
+            </div>
+
             <button 
-              onClick={handleLogin}
               disabled={isLoggingIn}
-              className="w-full bg-white text-primary py-5 rounded-2xl font-black text-xl hover:scale-[1.02] active:scale-[0.98] transition-all shadow-2xl flex items-center justify-center space-x-3"
+              className="w-full bg-secondary text-primary py-5 rounded-2xl font-black text-xl hover:scale-[1.02] active:scale-[0.98] transition-all shadow-2xl shadow-secondary/20 flex items-center justify-center space-x-3"
             >
               {isLoggingIn ? (
-                <RefreshCw className="animate-spin" size={24} />
+                <>
+                  <RefreshCw className="animate-spin" size={24} />
+                  <span>Authenticating...</span>
+                </>
               ) : (
-                <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-6 h-6" />
+                <span>Enter Dashboard</span>
               )}
-              <span>Sign in with Google</span>
             </button>
-          </div>
+          </form>
           
           <div className="mt-10 pt-8 border-t border-white/5">
             <button 
@@ -1672,7 +1669,11 @@ const AdminDashboard = () => {
             </h1>
             <div className="flex items-center space-x-3 w-full md:w-auto overflow-x-auto pb-2 md:pb-0 no-scrollbar">
               <button 
-                onClick={handleLogout}
+                onClick={() => {
+                  setIsLoggedIn(false);
+                  localStorage.removeItem('admin_logged_in');
+                  navigate('/');
+                }}
                 className="bg-red-500/10 text-red-400 p-3 rounded-2xl hover:bg-red-500/20 transition-all border border-red-500/10 flex items-center space-x-2"
                 title="Logout"
               >

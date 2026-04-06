@@ -20,7 +20,6 @@ import { cn } from "../lib/utils";
 import { fetchApi } from "../lib/api";
 import { Link, useNavigate } from "react-router-dom";
 import { Html5Qrcode } from "html5-qrcode";
-import { auth, signOut } from "../lib/firebase";
 
 interface TicketVerificationProps {
   onBack?: () => void;
@@ -102,7 +101,7 @@ export default function TicketVerification({ onBack, isDashboardView = false, on
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchApi("/api/admin/verify", {
+      const data = await fetchApi("/api/verify", {
         method: "POST",
         body: JSON.stringify({ ticketId: ticketId.trim() }),
       });
@@ -183,10 +182,8 @@ export default function TicketVerification({ onBack, isDashboardView = false, on
                   <span>Back</span>
                 </Link>
                 <button 
-                  onClick={async () => {
-                    await signOut(auth);
+                  onClick={() => {
                     localStorage.removeItem('admin_logged_in');
-                    localStorage.removeItem('admin_token');
                     navigate('/admin');
                   }}
                   className="p-3 bg-red-500/10 text-red-400 rounded-2xl hover:bg-red-500/20 transition-all border border-red-500/10 flex items-center gap-2 font-bold text-sm uppercase tracking-widest"
