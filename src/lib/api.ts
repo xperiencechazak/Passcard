@@ -3,10 +3,22 @@
  * headers, and error handling.
  */
 
+import { auth } from '../firebase';
+
 const API_BASE = import.meta.env.VITE_API_URL || '';
 
 export const fetchApi = async (endpoint: string, options: RequestInit = {}) => {
-  const token = localStorage.getItem('admin_token');
+  let token = localStorage.getItem('admin_token');
+  
+  // Try to get fresh token from Firebase if available
+  if (auth.currentUser) {
+    try {
+      token = await auth.currentUser.getIdToken(true);
+      localStorage.setItem('admin_token', token);
+    } catch (e) {
+      console.error('Error getting Firebase token:', e);
+    }
+  }
   
   const headers = {
     'Content-Type': 'application/json',
@@ -14,36 +26,26 @@ export const fetchApi = async (endpoint: string, options: RequestInit = {}) => {
     ...options.headers,
   };
 
-  const url = `${API_BASE}${endpoint}`;
-  
-  try {
-    const response = await fetch(url, {
-      ...options,
-      headers,
-      credentials: 'include',
-    });
+  const response = await fetch(`${API_BASE}${endpoint}`, {
+    ...options,
+    headers,
+    credentials: 'include',
+  });
 
-    if (!response.ok) {
-      if (response.status === 401 || response.status === 403) {
-        localStorage.removeItem('admin_token');
-        localStorage.removeItem('admin_logged_in');
-        window.dispatchEvent(new Event('admin-logout'));
-      }
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.error || `API Error: ${response.status}`);
+  if (!response.ok) {
+    if (response.status === 401 || response.status === 403) {
+      localStorage.removeItem('admin_token');
+      localStorage.removeItem('admin_logged_in');
+      window.dispatchEvent(new Event('admin-logout'));
     }
-
-    const contentType = response.headers.get('content-type');
-    if (contentType && contentType.includes('application/json')) {
-      return response.json();
-    }
-
-    return response;
-  } catch (error) {
-    console.error(`Fetch error for ${url}:`, error);
-    if (error instanceof TypeError && error.message === 'Failed to fetch') {
-      throw new Error('Network error: Failed to connect to the server. Please check your connection or ensure the server is running.');
-    }
-    throw error;
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.error || `API Error: ${response.status}`);
   }
+
+  const contentType = response.headers.get('content-type');
+  if (contentType && contentType.includes('application/json')) {
+    return response.json();
+  }
+
+  return response;
 };

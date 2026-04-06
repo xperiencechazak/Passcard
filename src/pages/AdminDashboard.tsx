@@ -40,7 +40,8 @@ import {
 import { cn, convertGoogleDriveUrl } from '../lib/utils';
 import { fetchApi } from '../lib/api';
 import TicketVerification from './TicketVerification';
-import { auth, googleProvider, signInWithPopup, signOut, onAuthStateChanged } from '../lib/firebase';
+import { auth, signInWithGoogle, logout } from '../firebase';
+import { onAuthStateChanged } from 'firebase/auth';
 
 const AddEventForm = ({ onSuccess }: { onSuccess: () => void }) => {
   const [formData, setFormData] = useState({
@@ -55,8 +56,8 @@ const AddEventForm = ({ onSuccess }: { onSuccess: () => void }) => {
     is_free: false,
     rsvp_limit: 0,
     ticketTypes: [
-      { name: 'Regular', price: 1000, quantity: 100, flash_sale_price: 0, flash_sale_start: '', flash_sale_end: '' },
-      { name: 'VIP', price: 3000, quantity: 20, flash_sale_price: 0, flash_sale_start: '', flash_sale_end: '' }
+      { name: 'Regular', price: 1000, quantity: 100 },
+      { name: 'VIP', price: 3000, quantity: 20 }
     ]
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -64,7 +65,7 @@ const AddEventForm = ({ onSuccess }: { onSuccess: () => void }) => {
   const addTicketType = () => {
     setFormData({
       ...formData,
-      ticketTypes: [...formData.ticketTypes, { name: '', price: 0, quantity: 0, flash_sale_price: 0, flash_sale_start: '', flash_sale_end: '' }]
+      ticketTypes: [...formData.ticketTypes, { name: '', price: 0, quantity: 0 }]
     });
   };
 
@@ -95,8 +96,8 @@ const AddEventForm = ({ onSuccess }: { onSuccess: () => void }) => {
         is_free: false,
         rsvp_limit: 0,
         ticketTypes: [
-          { name: 'Regular', price: 1000, quantity: 100, flash_sale_price: 0, flash_sale_start: '', flash_sale_end: '' },
-          { name: 'VIP', price: 3000, quantity: 20, flash_sale_price: 0, flash_sale_start: '', flash_sale_end: '' }
+          { name: 'Regular', price: 1000, quantity: 100 },
+          { name: 'VIP', price: 3000, quantity: 20 }
         ]
       });
       onSuccess();
@@ -1195,41 +1196,64 @@ const CompleteSetupModal = ({ isOpen, onClose, onSuccess, submission }: { isOpen
 const AdminDashboard = () => {
   const navigate = useNavigate();
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [isAuthChecking, setIsAuthChecking] = useState(true);
+  const [user, setUser] = useState<any>(null);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      if (user) {
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
         try {
-          const idToken = await user.getIdToken();
-          localStorage.setItem('admin_token', idToken);
-          setIsLoggedIn(true);
-        } catch (error) {
-          console.error('Error getting ID token:', error);
+          const token = await firebaseUser.getIdToken();
+          localStorage.setItem('admin_token', token);
+          
+          // Verify with backend that this user is an admin
+          const data = await fetchApi('/api/admin/login', {
+            method: 'POST'
+          });
+          
+          if (data.success) {
+            setIsLoggedIn(true);
+            setUser(firebaseUser);
+            localStorage.setItem('admin_logged_in', 'true');
+          } else {
+            setIsLoggedIn(false);
+            setUser(null);
+            localStorage.removeItem('admin_token');
+            localStorage.removeItem('admin_logged_in');
+            await logout();
+          }
+        } catch (err) {
+          console.error('Auth verification failed:', err);
           setIsLoggedIn(false);
+          setUser(null);
         }
       } else {
+        setIsLoggedIn(false);
+        setUser(null);
         localStorage.removeItem('admin_token');
         localStorage.removeItem('admin_logged_in');
-        setIsLoggedIn(false);
       }
-      setIsAuthLoading(false);
+      setIsAuthChecking(false);
     });
 
     return () => unsubscribe();
   }, []);
 
-  useEffect(() => {
-    const handleLogout = async () => {
-      await signOut(auth);
+  const handleLogout = async () => {
+    try {
+      await logout();
       setIsLoggedIn(false);
-    };
+      setUser(null);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  useEffect(() => {
     window.addEventListener('admin-logout', handleLogout);
     return () => window.removeEventListener('admin-logout', handleLogout);
   }, []);
   const [prefilledTicketId, setPrefilledTicketId] = useState<string | undefined>(undefined);
-  const [password, setPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
   const [activeTab, setActiveTab] = useState<'stats' | 'events' | 'tickets' | 'scan' | 'add-event' | 'inventory' | 'scan-history' | 'coupons' | 'contracts' | 'rsvps' | 'submissions'>('stats');
   const [editingEvent, setEditingEvent] = useState<any>(null);
   const [selectedSubmission, setSelectedSubmission] = useState<any>(null);
@@ -1240,7 +1264,6 @@ const AdminDashboard = () => {
   const [selectedInventoryEvent, setSelectedInventoryEvent] = useState<string>('');
   const [inventorySearch, setInventorySearch] = useState('');
   const [stats, setStats] = useState<any>(null);
-  const [categoryFilter, setCategoryFilter] = useState<string>('All');
   const [adminEvents, setAdminEvents] = useState<any[]>([]);
   const [pendingSubmissions, setPendingSubmissions] = useState<any[]>([]);
   const [tickets, setTickets] = useState<any[]>([]);
@@ -1252,32 +1275,15 @@ const AdminDashboard = () => {
   const [isContractModalOpen, setIsContractModalOpen] = useState(false);
   const [isCompleteSetupModalOpen, setIsCompleteSetupModalOpen] = useState(false);
   const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(false);
-  const [rememberMe, setRememberMe] = useState(true);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
-  const handleGoogleLogin = async () => {
+  const handleLogin = async () => {
     setIsLoggingIn(true);
     try {
-      const result = await signInWithPopup(auth, googleProvider);
-      const idToken = await result.user.getIdToken();
-      
-      const data = await fetchApi('/api/admin/login', {
-        method: 'POST',
-        body: JSON.stringify({ idToken })
-      });
-      
-      if (data.success) {
-        setIsLoggedIn(true);
-        localStorage.setItem('admin_token', idToken);
-        if (rememberMe) {
-          localStorage.setItem('admin_logged_in', 'true');
-        }
-        fetchData();
-      }
-    } catch (err: any) {
+      await signInWithGoogle();
+    } catch (err) {
       console.error(err);
-      await signOut(auth);
-      alert(err.message || 'Invalid credentials or connection error');
+      alert('Login failed. Please try again.');
     } finally {
       setIsLoggingIn(false);
     }
@@ -1526,7 +1532,7 @@ const AdminDashboard = () => {
     }
   };
 
-  if (isAuthLoading) {
+  if (isAuthChecking) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-primary">
         <RefreshCw className="animate-spin text-secondary" size={48} />
@@ -1547,31 +1553,22 @@ const AdminDashboard = () => {
               <Sparkles size={40} />
             </div>
             <h1 className="text-3xl font-bold text-white tracking-tight">Admin Portal</h1>
-            <p className="text-white/50 mt-2">Secure access for Xtraordinary events</p>
+            <p className="text-white/50 mt-2">Sign in to manage your events</p>
           </div>
           
           <div className="space-y-6">
             <button 
-              onClick={handleGoogleLogin}
+              onClick={handleLogin}
               disabled={isLoggingIn}
-              className="w-full bg-white text-primary py-5 rounded-2xl font-black text-xl hover:scale-[1.02] active:scale-[0.98] transition-all shadow-2xl shadow-white/10 flex items-center justify-center space-x-4"
+              className="w-full bg-white text-primary py-5 rounded-2xl font-black text-xl hover:scale-[1.02] active:scale-[0.98] transition-all shadow-2xl flex items-center justify-center space-x-3"
             >
               {isLoggingIn ? (
-                <>
-                  <RefreshCw className="animate-spin" size={24} />
-                  <span>Authenticating...</span>
-                </>
+                <RefreshCw className="animate-spin" size={24} />
               ) : (
-                <>
-                  <img src="https://www.google.com/favicon.ico" alt="Google" className="w-6 h-6" />
-                  <span>Sign in with Google</span>
-                </>
+                <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-6 h-6" />
               )}
+              <span>Sign in with Google</span>
             </button>
-
-            <p className="text-center text-white/30 text-sm font-medium px-4">
-              Only authorized administrator accounts can access this dashboard.
-            </p>
           </div>
           
           <div className="mt-10 pt-8 border-t border-white/5">
@@ -1638,11 +1635,9 @@ const AdminDashboard = () => {
         </nav>
 
         <button 
-          onClick={async () => {
-            await signOut(auth);
+          onClick={() => {
             setIsLoggedIn(false);
             localStorage.removeItem('admin_logged_in');
-            localStorage.removeItem('admin_token');
             navigate('/');
           }}
           className="mt-8 flex items-center space-x-4 p-4 text-white/40 hover:text-red-400 transition-colors font-bold"
@@ -1677,12 +1672,7 @@ const AdminDashboard = () => {
             </h1>
             <div className="flex items-center space-x-3 w-full md:w-auto overflow-x-auto pb-2 md:pb-0 no-scrollbar">
               <button 
-                onClick={() => {
-                  setIsLoggedIn(false);
-                  localStorage.removeItem('admin_logged_in');
-                  localStorage.removeItem('admin_token');
-                  navigate('/');
-                }}
+                onClick={handleLogout}
                 className="bg-red-500/10 text-red-400 p-3 rounded-2xl hover:bg-red-500/20 transition-all border border-red-500/10 flex items-center space-x-2"
                 title="Logout"
               >
@@ -1841,7 +1831,7 @@ const AdminDashboard = () => {
                   className="bg-surface p-5 md:p-8 rounded-[24px] md:rounded-[32px] shadow-sm border border-white/10"
                 >
                   <div className="w-10 h-10 md:w-12 md:h-12 bg-green-100/10 rounded-xl md:rounded-2xl flex items-center justify-center text-green-400 mb-4 md:mb-6">
-                    <TrendingUp size={20} className="md:w-6 md:h-6" />
+                    <TrendingUp size={20} md:size={24} />
                   </div>
                   <div className="text-[10px] md:text-xs text-white/30 uppercase font-bold tracking-wider mb-1">Revenue</div>
                   <div className="text-xl md:text-3xl font-bold text-white">KES {stats.revenue.toLocaleString()}</div>
@@ -1853,7 +1843,7 @@ const AdminDashboard = () => {
                   className="bg-surface p-5 md:p-8 rounded-[24px] md:rounded-[32px] shadow-sm border border-white/10"
                 >
                   <div className="w-10 h-10 md:w-12 md:h-12 bg-blue-100/10 rounded-xl md:rounded-2xl flex items-center justify-center text-blue-400 mb-4 md:mb-6">
-                    <Users size={20} className="md:w-6 md:h-6" />
+                    <Users size={20} md:size={24} />
                   </div>
                   <div className="text-[10px] md:text-xs text-white/30 uppercase font-bold tracking-wider mb-1">Sold</div>
                   <div className="text-xl md:text-3xl font-bold text-white">{stats.ticketsSold}</div>
@@ -1865,7 +1855,7 @@ const AdminDashboard = () => {
                   className="bg-surface p-5 md:p-8 rounded-[24px] md:rounded-[32px] shadow-sm border border-white/10"
                 >
                   <div className="w-10 h-10 md:w-12 md:h-12 bg-orange-100/10 rounded-xl md:rounded-2xl flex items-center justify-center text-orange-400 mb-4 md:mb-6">
-                    <QrCode size={20} className="md:w-6 md:h-6" />
+                    <QrCode size={20} md:size={24} />
                   </div>
                   <div className="text-[10px] md:text-xs text-white/30 uppercase font-bold tracking-wider mb-1">Scanned</div>
                   <div className="text-xl md:text-3xl font-bold text-white">{tickets.filter(t => t.status === 'USED').length}</div>
@@ -1877,7 +1867,7 @@ const AdminDashboard = () => {
                   className="bg-surface p-5 md:p-8 rounded-[24px] md:rounded-[32px] shadow-sm border border-white/10"
                 >
                   <div className="w-10 h-10 md:w-12 md:h-12 bg-purple-100/10 rounded-xl md:rounded-2xl flex items-center justify-center text-purple-400 mb-4 md:mb-6">
-                    <Heart size={20} className="md:w-6 md:h-6" />
+                    <Heart size={20} md:size={24} />
                   </div>
                   <div className="text-[10px] md:text-xs text-white/30 uppercase font-bold tracking-wider mb-1">RSVPs</div>
                   <div className="text-xl md:text-3xl font-bold text-white">{stats.totalRSVPs || 0}</div>
@@ -1907,68 +1897,6 @@ const AdminDashboard = () => {
                   <FileText size={24} className="text-secondary" />
                   <span className="text-[10px] font-bold text-white/60 uppercase">Contracts</span>
                 </button>
-              </div>
-
-              {/* Analytics Breakdown */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                <motion.div 
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: 0.4 }}
-                  className="bg-surface p-8 rounded-[32px] border border-white/10"
-                >
-                  <h3 className="text-xl font-bold text-white mb-6 flex items-center space-x-3">
-                    <Tag size={20} className="text-secondary" />
-                    <span>Ticket Type Breakdown</span>
-                  </h3>
-                  <div className="space-y-4">
-                    {stats.typeBreakdown?.map((type: any, idx: number) => (
-                      <div key={idx} className="flex items-center justify-between p-4 bg-white/5 rounded-2xl border border-white/5">
-                        <div>
-                          <div className="text-sm font-bold text-white">{type.name}</div>
-                          <div className="text-[10px] text-white/30 uppercase font-bold tracking-widest">{type.count} Sold</div>
-                        </div>
-                        <div className="text-right">
-                          <div className="text-sm font-bold text-secondary">KES {(type.revenue || 0).toLocaleString()}</div>
-                          <div className="text-[10px] text-white/30 uppercase font-bold tracking-widest">Revenue</div>
-                        </div>
-                      </div>
-                    ))}
-                    {(!stats.typeBreakdown || stats.typeBreakdown.length === 0) && (
-                      <div className="text-center py-8 text-white/20 text-sm italic">No ticket data available</div>
-                    )}
-                  </div>
-                </motion.div>
-
-                <motion.div 
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: 0.5 }}
-                  className="bg-surface p-8 rounded-[32px] border border-white/10"
-                >
-                  <h3 className="text-xl font-bold text-white mb-6 flex items-center space-x-3">
-                    <TrendingUp size={20} className="text-accent" />
-                    <span>Top Revenue Events</span>
-                  </h3>
-                  <div className="space-y-4">
-                    {stats.revenueByEvent?.map((event: any, idx: number) => (
-                      <div key={idx} className="flex items-center justify-between p-4 bg-white/5 rounded-2xl border border-white/5">
-                        <div className="flex items-center space-x-3">
-                          <div className="w-8 h-8 bg-accent/10 rounded-lg flex items-center justify-center text-accent font-bold text-xs">
-                            {idx + 1}
-                          </div>
-                          <div className="text-sm font-bold text-white truncate max-w-[150px]">{event.name}</div>
-                        </div>
-                        <div className="text-right">
-                          <div className="text-sm font-bold text-accent">KES {(event.revenue || 0).toLocaleString()}</div>
-                        </div>
-                      </div>
-                    ))}
-                    {(!stats.revenueByEvent || stats.revenueByEvent.length === 0) && (
-                      <div className="text-center py-8 text-white/20 text-sm italic">No revenue data available</div>
-                    )}
-                  </div>
-                </motion.div>
               </div>
 
               <div className="flex items-center justify-between">
@@ -2089,40 +2017,9 @@ const AdminDashboard = () => {
           )}
 
           {activeTab === 'events' && (
-            <div className="space-y-8">
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-surface p-6 rounded-[32px] border border-white/10">
-                <div className="flex items-center space-x-3">
-                  <div className="w-10 h-10 bg-secondary/20 rounded-xl flex items-center justify-center text-secondary">
-                    <Tag size={20} />
-                  </div>
-                  <div>
-                    <h3 className="text-white font-bold">Filter by Category</h3>
-                    <p className="text-white/40 text-xs">Display events from a specific category</p>
-                  </div>
-                </div>
-                <div className="flex items-center space-x-2 overflow-x-auto pb-2 md:pb-0 scrollbar-hide">
-                  {['All', 'Concert', 'Worship', 'Conference', 'Youth', 'Other'].map((cat) => (
-                    <button
-                      key={cat}
-                      onClick={() => setCategoryFilter(cat)}
-                      className={cn(
-                        "px-4 py-2 rounded-xl text-sm font-bold transition-all whitespace-nowrap border",
-                        categoryFilter === cat 
-                          ? "bg-secondary text-white border-secondary shadow-lg shadow-secondary/20" 
-                          : "bg-white/5 text-white/50 border-white/10 hover:bg-white/10"
-                      )}
-                    >
-                      {cat === 'Worship' ? 'Worship Night' : cat === 'Youth' ? 'Youth Event' : cat}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                {adminEvents
-                  .filter(event => categoryFilter === 'All' || event.category === categoryFilter)
-                  .map((event) => (
-                    <div key={event.id} className="bg-surface p-8 rounded-[32px] shadow-sm border border-white/10 group">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+              {adminEvents.map((event) => (
+                <div key={event.id} className="bg-surface p-8 rounded-[32px] shadow-sm border border-white/10 group">
                   <div className="flex justify-between items-start mb-6">
                     <div className="flex items-center space-x-4">
                       <img src={event.banner_url} className="w-16 h-16 rounded-2xl object-cover" alt="" referrerPolicy="no-referrer" />
@@ -2245,15 +2142,14 @@ const AdminDashboard = () => {
                   </div>
                 </div>
               ))}
-              {adminEvents.filter(event => categoryFilter === 'All' || event.category === categoryFilter).length === 0 && (
+              {adminEvents.length === 0 && (
                 <div className="md:col-span-2 text-center py-20 bg-white/5 rounded-[32px] border border-dashed border-white/10">
                   <Calendar className="mx-auto text-white/10 mb-4" size={48} />
-                  <p className="text-white/40">No events found in this category.</p>
+                  <p className="text-white/40">No events found. Start by creating one.</p>
                 </div>
               )}
             </div>
-          </div>
-        )}
+          )}
 
           {activeTab === 'submissions' && (
             <div className="space-y-8">
@@ -3091,7 +2987,6 @@ const AdminDashboard = () => {
                     onClick={() => {
                       setIsLoggedIn(false);
                       localStorage.removeItem('admin_logged_in');
-                      localStorage.removeItem('admin_token');
                       navigate('/');
                     }}
                     className="w-full flex items-center space-x-3 p-4 rounded-xl text-red-400 hover:bg-red-400/10 transition-all text-left"

@@ -3,21 +3,43 @@ import { createServer as createViteServer } from "vite";
 import cors from "cors";
 import bodyParser from "body-parser";
 import { v4 as uuidv4 } from 'uuid';
-import admin from 'firebase-admin';
 import db from "./src/server/db.ts";
-
-// Initialize Firebase Admin
-if (!admin.apps.length) {
-  admin.initializeApp();
-}
 import { initiateSTKPush } from "./src/server/mpesa.ts";
 import { sendTicketEmail, sendInquiryEmail, generateTicketPDF, sendEventReportEmail, generateEventReportPDF } from "./src/server/email.ts";
 import { generateContractPDF, sendContractEmail } from "./src/server/contractGenerator.ts";
-import { convertGoogleDriveUrl } from "./src/lib/utils.ts";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
+import admin from "firebase-admin";
+import firebaseConfig from "./firebase-applet-config.json";
+
+// Initialize Firebase Admin
+if (!admin.apps.length) {
+  console.log('Initializing Firebase Admin with Project ID:', firebaseConfig.projectId);
+  admin.initializeApp({
+    projectId: firebaseConfig.projectId,
+  });
+} else {
+  console.log('Firebase Admin already initialized');
+}
+
+function convertGoogleDriveUrl(url: string): string {
+  if (!url) return url;
+  if (url.includes('drive.google.com')) {
+    let fileId = '';
+    const matchId = url.match(/\/d\/([a-zA-Z0-9_-]+)/);
+    const matchQuery = url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+    
+    if (matchId) fileId = matchId[1];
+    else if (matchQuery) fileId = matchQuery[1];
+    
+    if (fileId) {
+      return `https://drive.google.com/uc?export=view&id=${fileId}`;
+    }
+  }
+  return url;
+}
 
 function getYearAlphabet(year: number) {
   // 2026 -> A, 2027 -> B, ...
@@ -82,32 +104,15 @@ const PORT = 3000;
 
 const allowedOrigins = [
   process.env.APP_URL,
-  'https://thepasscard.vercel.app',
   'http://localhost:3000',
   'http://localhost:5173'
-].filter(Boolean).map(url => url?.replace(/\/$/, '')) as string[];
+].filter(Boolean) as string[];
 
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (like mobile apps or curl)
-    if (!origin) return callback(null, true);
-    
-    // In development, allow all origins
-    if (process.env.NODE_ENV !== "production") {
-      return callback(null, true);
-    }
-    
-    // Check if origin is in allowed list
-    const normalizedOrigin = origin.replace(/\/$/, '');
-    const isAllowed = allowedOrigins.some(allowed => normalizedOrigin === allowed || normalizedOrigin.startsWith(allowed));
-    
-    // Also allow any .run.app or .aistudio.google origin in production for flexibility in AI Studio
-    const isAIStudioOrigin = normalizedOrigin.endsWith('.run.app') || normalizedOrigin.endsWith('.aistudio.google');
-
-    if (isAllowed || isAIStudioOrigin) {
+    if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
-      console.warn(`CORS blocked for origin: ${origin}`);
       callback(new Error('Not allowed by CORS'));
     }
   },
@@ -116,88 +121,80 @@ app.use(cors({
 app.use(bodyParser.json());
 app.use('/uploads', express.static(uploadsDir));
 
-// Health Check
-app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() });
-});
-
 // Admin Auth Middleware
+const ADMIN_EMAILS = [
+  'xperiencechazak@gmail.com',
+  process.env.ADMIN_EMAIL
+].filter(Boolean) as string[];
+
 const adminAuth = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
-  // Allow login endpoint without token
-  if (req.path === '/login' || req.path === '/login/' || req.originalUrl.endsWith('/login') || req.originalUrl.endsWith('/login/')) {
-    return next();
-  }
-  
   const authHeader = req.headers['authorization'];
+  console.log('Admin Auth Header:', authHeader ? 'Present' : 'Missing');
+  
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    console.warn(`Admin Auth Failed: No Bearer token for path ${req.path}`);
-    return res.status(401).json({ error: 'Unauthorized' });
+    return res.status(401).json({ error: 'Unauthorized: No token provided' });
   }
 
-  const idToken = authHeader.split('Bearer ')[1];
+  const token = authHeader.split('Bearer ')[1];
+  
   try {
-    const decodedToken = await admin.auth().verifyIdToken(idToken);
-    // Check if the user is an admin
-    const adminEmails = (process.env.ADMIN_EMAILS || 'xperiencechazak@gmail.com').split(',').map(e => e.trim());
-    if (decodedToken.email && (adminEmails.includes(decodedToken.email) || decodedToken.admin === true)) {
+    const decodedToken = await admin.auth().verifyIdToken(token);
+    console.log('Decoded Token Email:', decodedToken.email);
+    if (ADMIN_EMAILS.includes(decodedToken.email || '')) {
       (req as any).user = decodedToken;
       next();
     } else {
-      console.warn(`Admin Auth Failed: User ${decodedToken.email} is not an admin`);
-      res.status(403).json({ error: 'Forbidden: Admin access required' });
+      console.warn(`Unauthorized access attempt by: ${decodedToken.email}`);
+      res.status(403).json({ error: 'Forbidden: You do not have admin access' });
     }
   } catch (error) {
-    console.error('Error verifying Firebase ID token:', error);
+    console.error('Firebase Auth Error:', error);
     res.status(401).json({ error: 'Unauthorized: Invalid token' });
   }
 };
 
-// --- Migrations ---
-// Ensure all events have an event_code
-try {
-  const eventsWithoutCode = db.prepare('SELECT id FROM events WHERE event_code IS NULL').all() as any[];
-  for (const event of eventsWithoutCode) {
-    let eventCode = generateEventCode();
-    let codeExists = db.prepare('SELECT id FROM events WHERE event_code = ?').get(eventCode);
-    while (codeExists) {
-      eventCode = generateEventCode();
-      codeExists = db.prepare('SELECT id FROM events WHERE event_code = ?').get(eventCode);
-    }
-    db.prepare('UPDATE events SET event_code = ? WHERE id = ?').run(eventCode, event.id);
-  }
-} catch (e) {
-  console.error('Migration error (event_code):', e);
-}
+app.use('/api/admin', adminAuth);
 
-// --- API Routes ---
-
-// Admin Login Endpoint (Must be before adminAuth middleware)
+// Admin Login Endpoint (Now just a verification endpoint for Firebase tokens)
 app.post("/api/admin/login", async (req, res) => {
-  const { idToken } = req.body;
-  
-  if (!idToken) {
-    return res.status(400).json({ error: 'ID Token is required' });
+  const authHeader = req.headers['authorization'];
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Unauthorized' });
   }
 
+  const token = authHeader.split('Bearer ')[1];
+  
   try {
-    const decodedToken = await admin.auth().verifyIdToken(idToken);
-    const adminEmails = (process.env.ADMIN_EMAILS || 'xperiencechazak@gmail.com').split(',').map(e => e.trim());
-    
-    if (decodedToken.email && (adminEmails.includes(decodedToken.email) || decodedToken.admin === true)) {
-      console.log(`Admin login successful for ${decodedToken.email}`);
-      res.json({ success: true, token: idToken });
+    const decodedToken = await admin.auth().verifyIdToken(token);
+    if (ADMIN_EMAILS.includes(decodedToken.email || '')) {
+      res.json({ success: true, user: decodedToken });
     } else {
-      console.warn(`Login failed: User ${decodedToken.email} is not an admin`);
-      res.status(403).json({ error: 'Forbidden: Admin access required' });
+      res.status(403).json({ error: 'Forbidden: Not an admin' });
     }
   } catch (error) {
-    console.error('Error verifying Firebase ID token during login:', error);
-    res.status(401).json({ error: 'Invalid credentials' });
+    res.status(401).json({ error: 'Invalid token' });
   }
 });
 
-app.use('/api/admin', adminAuth);
+async function setupServer() {
+  // --- Migrations ---
+  // Ensure all events have an event_code
+  try {
+    const eventsWithoutCode = db.prepare('SELECT id FROM events WHERE event_code IS NULL').all() as any[];
+    for (const event of eventsWithoutCode) {
+      let eventCode = generateEventCode();
+      let codeExists = db.prepare('SELECT id FROM events WHERE event_code = ?').get(eventCode);
+      while (codeExists) {
+        eventCode = generateEventCode();
+        codeExists = db.prepare('SELECT id FROM events WHERE event_code = ?').get(eventCode);
+      }
+      db.prepare('UPDATE events SET event_code = ? WHERE id = ?').run(eventCode, event.id);
+    }
+  } catch (e) {
+    console.error('Migration error (event_code):', e);
+  }
 
+  // --- API Routes ---
 
   // Get Pre-uploaded Images
   app.get("/api/assets/images", (req, res) => {
@@ -559,8 +556,7 @@ app.use('/api/admin', adminAuth);
       `);
 
       const transaction = db.transaction(() => {
-        // Default status to PUBLISHED as per user requirement for immediate visibility
-        insertEvent.run(eventId, name, organizer, venue, date, time, finalBannerUrl, description, category || 'Concert', nextEventNum, eventCode, is_free ? 1 : 0, rsvp_limit || null, 'PUBLISHED');
+        insertEvent.run(eventId, name, organizer, venue, date, time, finalBannerUrl, description, category || 'Concert', nextEventNum, eventCode, is_free ? 1 : 0, rsvp_limit || null, 'DRAFT');
         if (!is_free && ticketTypes) {
           for (const tt of ticketTypes) {
             insertTicketType.run(
@@ -586,8 +582,8 @@ app.use('/api/admin', adminAuth);
     }
   });
 
-  // Admin: Verify Ticket (Alias for /api/tickets/scan)
-  const verifyTicketHandler = (req: express.Request, res: express.Response) => {
+  // Admin: Verify Ticket
+  app.post("/api/admin/verify", (req, res) => {
     const { ticketId } = req.body;
     const normalizedTicketId = ticketId?.trim()?.toUpperCase();
     
@@ -604,22 +600,19 @@ app.use('/api/admin', adminAuth);
     `).get(normalizedTicketId) as any;
 
     if (!ticket) {
-      console.warn(`[Verification] Invalid ticket ID: ${normalizedTicketId}`);
       return res.json({ status: 'INVALID', message: 'Invalid Ticket' });
     }
 
     const ticketTypeName = ticket.ticket_type_name || 'Free / RSVP';
 
     if (ticket.deleted_at) {
-      console.warn(`[Verification] Cancelled ticket used: ${ticket.id}`);
       return res.json({ status: 'INVALID', message: 'Ticket has been cancelled/deleted' });
     }
 
     if (ticket.status === 'USED') {
       // Log failed attempt
-      db.prepare("INSERT INTO scan_logs (ticket_id, status, message) VALUES (?, ?, ?)").run(ticket.id, 'ALREADY_USED', 'Attempted to use an already scanned ticket');
+      db.prepare("INSERT INTO scan_logs (ticket_id, status, message) VALUES (?, ?, ?)").run(ticketId, 'ALREADY_USED', 'Attempted to use an already scanned ticket');
       
-      console.warn(`[Verification] Ticket already used: ${ticket.id} by ${ticket.attendee_name}`);
       return res.json({ 
         status: 'USED', 
         message: 'Ticket Already Used',
@@ -630,12 +623,11 @@ app.use('/api/admin', adminAuth);
 
     // Mark as used
     const now = new Date().toISOString();
-    db.prepare("UPDATE tickets SET status = 'USED', scan_time = ? WHERE id = ?").run(now, ticket.id);
+    db.prepare("UPDATE tickets SET status = 'USED', scan_time = ? WHERE id = ?").run(now, ticketId);
     
     // Log successful scan
-    db.prepare("INSERT INTO scan_logs (ticket_id, status, message) VALUES (?, ?, ?)").run(ticket.id, 'SUCCESS', 'Access Granted');
+    db.prepare("INSERT INTO scan_logs (ticket_id, status, message) VALUES (?, ?, ?)").run(ticketId, 'SUCCESS', 'Access Granted');
 
-    console.log(`[Verification] Success: ${ticket.id} for ${ticket.attendee_name} at ${ticket.event_name}`);
     res.json({ 
       status: 'VALID', 
       message: 'Access Granted',
@@ -643,10 +635,7 @@ app.use('/api/admin', adminAuth);
       event_name: ticket.event_name,
       ticket_type: ticketTypeName
     });
-  };
-
-  app.post("/api/admin/verify", verifyTicketHandler);
-  app.post("/api/tickets/scan", adminAuth, verifyTicketHandler);
+  });
 
   // User: Get tickets by email
   app.get("/api/my-tickets", (req, res) => {
@@ -943,58 +932,32 @@ app.use('/api/admin', adminAuth);
 
   // Admin: Get Stats
   app.get("/api/admin/stats", (req, res) => {
-    try {
-      const totalSales = db.prepare("SELECT SUM(amount) as total FROM payments WHERE status = 'COMPLETED'").get() as any;
-      const paidTickets = db.prepare(`
-        SELECT COUNT(*) as count 
-        FROM tickets t 
-        JOIN events e ON t.event_id = e.id 
-        WHERE e.is_free = 0 AND t.deleted_at IS NULL
-      `).get() as any;
-      const totalRSVPs = db.prepare(`
-        SELECT COUNT(*) as count 
-        FROM tickets t 
-        JOIN events e ON t.event_id = e.id 
-        WHERE e.is_free = 1 AND t.deleted_at IS NULL
-      `).get() as any;
-      const recentTickets = db.prepare(`
-        SELECT t.*, e.name as event_name 
-        FROM tickets t 
-        JOIN events e ON t.event_id = e.id 
-        ORDER BY t.created_at DESC LIMIT 10
-      `).all();
+    const totalSales = db.prepare("SELECT SUM(amount) as total FROM payments WHERE status = 'COMPLETED'").get() as any;
+    const paidTickets = db.prepare(`
+      SELECT COUNT(*) as count 
+      FROM tickets t 
+      JOIN events e ON t.event_id = e.id 
+      WHERE e.is_free = 0
+    `).get() as any;
+    const totalRSVPs = db.prepare(`
+      SELECT COUNT(*) as count 
+      FROM tickets t 
+      JOIN events e ON t.event_id = e.id 
+      WHERE e.is_free = 1
+    `).get() as any;
+    const recentTickets = db.prepare(`
+      SELECT t.*, e.name as event_name 
+      FROM tickets t 
+      JOIN events e ON t.event_id = e.id 
+      ORDER BY t.created_at DESC LIMIT 10
+    `).all();
 
-      // Ticket type breakdown
-      const typeBreakdown = db.prepare(`
-        SELECT tt.name, COUNT(t.id) as count, SUM(p.amount / p.quantity) as revenue
-        FROM ticket_types tt
-        LEFT JOIN tickets t ON tt.id = t.ticket_type_id AND t.deleted_at IS NULL
-        LEFT JOIN payments p ON t.payment_id = p.id AND p.status = 'COMPLETED'
-        GROUP BY tt.name
-      `).all();
-
-      // Revenue by event
-      const revenueByEvent = db.prepare(`
-        SELECT e.name, SUM(p.amount) as revenue
-        FROM events e
-        JOIN payments p ON e.id = p.event_id
-        WHERE p.status = 'COMPLETED'
-        GROUP BY e.id
-        ORDER BY revenue DESC
-        LIMIT 5
-      `).all();
-
-      res.json({
-        revenue: totalSales.total || 0,
-        ticketsSold: paidTickets.count,
-        totalRSVPs: totalRSVPs.count,
-        recentTickets,
-        typeBreakdown,
-        revenueByEvent
-      });
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
+    res.json({
+      revenue: totalSales.total || 0,
+      ticketsSold: paidTickets.count,
+      totalRSVPs: totalRSVPs.count,
+      recentTickets
+    });
   });
 
   // Admin: Get all events with sales data
@@ -1390,29 +1353,6 @@ app.use('/api/admin', adminAuth);
     res.send(csvContent);
   });
 
-// SPA fallback: serve index.html for all non-API routes
-if (process.env.NODE_ENV === "production" || process.env.VERCEL) {
-  const distPath = path.join(process.cwd(), 'dist');
-  app.use(express.static(distPath));
-  
-  app.get("*", (req, res) => {
-    // If it's an API route that wasn't caught, return 404
-    if (req.path.startsWith('/api/')) {
-      return res.status(404).json({ error: 'API route not found' });
-    }
-    
-    // Otherwise, serve index.html for SPA routing
-    const indexPath = path.join(distPath, 'index.html');
-    if (fs.existsSync(indexPath)) {
-      res.sendFile(indexPath);
-    } else {
-      // Fallback to root index.html if dist/index.html doesn't exist (shouldn't happen in prod)
-      res.sendFile(path.join(process.cwd(), 'index.html'));
-    }
-  });
-}
-
-async function setupServer() {
   // --- Vite Middleware ---
 
   if (process.env.NODE_ENV !== "production" && !process.env.VERCEL) {
@@ -1421,6 +1361,14 @@ async function setupServer() {
       appType: "spa",
     });
     app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), 'dist');
+    app.use(express.static(distPath));
+    
+    // SPA fallback: serve index.html for all non-API routes
+    app.get("*", (req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
   }
 
   if (!process.env.VERCEL) {

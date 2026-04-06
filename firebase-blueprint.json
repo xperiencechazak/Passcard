@@ -2,7 +2,7 @@
   "entities": {
     "Event": {
       "title": "Event",
-      "description": "An event created by an organizer",
+      "description": "An event being organized.",
       "type": "object",
       "properties": {
         "id": { "type": "string" },
@@ -15,37 +15,60 @@
         "description": { "type": "string" },
         "category": { "type": "string" },
         "is_hidden": { "type": "boolean" },
-        "event_number": { "type": "integer" },
+        "event_number": { "type": "number" },
         "event_code": { "type": "string" },
         "is_free": { "type": "boolean" },
-        "rsvp_limit": { "type": "integer" },
+        "rsvp_limit": { "type": "number" },
         "is_completed": { "type": "boolean" },
-        "status": { "type": "string" },
+        "status": { "type": "string", "enum": ["DRAFT", "PENDING", "PUBLISHED"] },
         "organizer_email": { "type": "string" },
         "created_at": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "name", "organizer", "venue", "date", "time"]
+      "required": ["name", "organizer", "venue", "date", "time"]
     },
     "TicketType": {
       "title": "TicketType",
-      "description": "A type of ticket for an event",
+      "description": "A type of ticket for an event.",
       "type": "object",
       "properties": {
         "id": { "type": "string" },
         "event_id": { "type": "string" },
         "name": { "type": "string" },
-        "price": { "type": "integer" },
-        "quantity": { "type": "integer" },
-        "sold": { "type": "integer" },
-        "flash_sale_price": { "type": "integer" },
+        "price": { "type": "number" },
+        "quantity": { "type": "number" },
+        "sold": { "type": "number" },
+        "flash_sale_price": { "type": "number" },
         "flash_sale_start": { "type": "string", "format": "date-time" },
         "flash_sale_end": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "event_id", "name", "price", "quantity"]
+      "required": ["event_id", "name", "price", "quantity"]
+    },
+    "Payment": {
+      "title": "Payment",
+      "description": "A payment record.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "checkout_request_id": { "type": "string" },
+        "merchant_request_id": { "type": "string" },
+        "mpesa_receipt_number": { "type": "string" },
+        "phone": { "type": "string" },
+        "amount": { "type": "number" },
+        "quantity": { "type": "number" },
+        "status": { "type": "string", "enum": ["PENDING", "COMPLETED", "FAILED"] },
+        "event_id": { "type": "string" },
+        "ticket_type_id": { "type": "string" },
+        "attendee_name": { "type": "string" },
+        "attendee_email": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "coupon_id": { "type": "string" },
+        "discount_amount": { "type": "number" }
+      },
+      "required": ["phone", "amount", "event_id", "ticket_type_id", "attendee_name", "attendee_email"]
     },
     "Ticket": {
       "title": "Ticket",
-      "description": "A ticket purchased by an attendee",
+      "description": "A ticket issued to an attendee.",
       "type": "object",
       "properties": {
         "id": { "type": "string" },
@@ -54,44 +77,89 @@
         "ticket_type_id": { "type": "string" },
         "attendee_name": { "type": "string" },
         "attendee_email": { "type": "string" },
-        "status": { "type": "string" },
+        "status": { "type": "string", "enum": ["VALID", "USED", "CANCELLED"] },
         "scan_time": { "type": "string", "format": "date-time" },
         "email_status": { "type": "string" },
         "email_sent_at": { "type": "string", "format": "date-time" },
         "created_at": { "type": "string", "format": "date-time" },
-        "ticket_sequence_number": { "type": "integer" }
+        "deleted_at": { "type": "string", "format": "date-time" },
+        "ticket_sequence_number": { "type": "number" }
       },
-      "required": ["id", "payment_id", "event_id", "ticket_type_id", "attendee_name", "attendee_email"]
+      "required": ["payment_id", "event_id", "ticket_type_id", "attendee_name", "attendee_email"]
     },
-    "User": {
-      "title": "User",
-      "description": "A user of the application",
+    "ScanLog": {
+      "title": "ScanLog",
+      "description": "A log of a ticket scan.",
       "type": "object",
       "properties": {
-        "uid": { "type": "string" },
-        "email": { "type": "string" },
-        "displayName": { "type": "string" },
-        "role": { "type": "string", "enum": ["admin", "user"] }
+        "ticket_id": { "type": "string" },
+        "status": { "type": "string" },
+        "message": { "type": "string" },
+        "scanned_at": { "type": "string", "format": "date-time" }
       },
-      "required": ["uid", "email"]
+      "required": ["ticket_id", "status"]
+    },
+    "AdminLog": {
+      "title": "AdminLog",
+      "description": "A log of an admin action.",
+      "type": "object",
+      "properties": {
+        "admin_email": { "type": "string" },
+        "action": { "type": "string" },
+        "details": { "type": "string" },
+        "event_id": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["admin_email", "action"]
+    },
+    "Coupon": {
+      "title": "Coupon",
+      "description": "A discount coupon.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "code": { "type": "string" },
+        "discount_percentage": { "type": "number" },
+        "event_id": { "type": "string" },
+        "ticket_type_id": { "type": "string" },
+        "expiry_date": { "type": "string", "format": "date-time" },
+        "usage_limit": { "type": "number" },
+        "used_count": { "type": "number" },
+        "per_user_limit": { "type": "number" },
+        "is_active": { "type": "boolean" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["code", "discount_percentage"]
     }
   },
   "firestore": {
     "/events/{eventId}": {
-      "schema": "Event",
-      "description": "Collection of events"
+      "schema": { "$ref": "Event" },
+      "description": "Collection of events."
     },
-    "/events/{eventId}/ticketTypes/{ticketTypeId}": {
-      "schema": "TicketType",
-      "description": "Ticket types for a specific event"
+    "/events/{eventId}/ticket_types/{ticketTypeId}": {
+      "schema": { "$ref": "TicketType" },
+      "description": "Sub-collection of ticket types for an event."
+    },
+    "/payments/{paymentId}": {
+      "schema": { "$ref": "Payment" },
+      "description": "Collection of payments."
     },
     "/tickets/{ticketId}": {
-      "schema": "Ticket",
-      "description": "Collection of tickets"
+      "schema": { "$ref": "Ticket" },
+      "description": "Collection of tickets."
     },
-    "/users/{userId}": {
-      "schema": "User",
-      "description": "User profiles"
+    "/scan_logs/{logId}": {
+      "schema": { "$ref": "ScanLog" },
+      "description": "Collection of scan logs."
+    },
+    "/admin_logs/{logId}": {
+      "schema": { "$ref": "AdminLog" },
+      "description": "Collection of admin logs."
+    },
+    "/coupons/{couponId}": {
+      "schema": { "$ref": "Coupon" },
+      "description": "Collection of coupons."
     }
   }
 }
